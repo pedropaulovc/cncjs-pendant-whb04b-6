@@ -7,7 +7,7 @@
 // Copyright (c) 2017-2022 various contributors. See LICENSE for copyright
 // and MIT license information.
 
-import { Actions }       from './actions.js';
+import { WHB04BActions } from './whb04b_actions.js';
 import { GcodeSender }   from './gcode-sender.js';
 
 //----------------------------------------------------------------------------
@@ -21,7 +21,7 @@ zProbeRecord: ZProbeRecord;
   // Override the constructor to subscribe to serial port read messages, so
   // that we can react to grbl-specific messages.
   //----------------------------------------------------------------------------
-  constructor(actions: Actions) {
+  constructor(actions: WHB04BActions) {
     super(actions);
     this.zProbeRecord = new ZProbeRecord();
     this.connector.subscribeMessage('serialport:read', (data:string) => {
