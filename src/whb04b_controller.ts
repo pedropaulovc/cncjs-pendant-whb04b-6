@@ -66,7 +66,7 @@ export enum DialPosition {
   Rate30Percent = 0x10,   // 30% / 1
   Rate60Percent = 0x1A,   // 60%
   Rate100Percent = 0x1B,  // 100%
-  Lead = 0x1C,            // Lead/Manual
+  Lead = 0x9B,            // Lead/Manual (actual value from pendant)
   
   Unknown = 255
 }
@@ -119,7 +119,7 @@ export class PendantInputData {
   }
 
   private parseRightDial(value: number): DialPosition {
-    // Right dial (feed rate/step size) valid values: 0x0D, 0x0E, 0x0F, 0x10, 0x1A, 0x1B, 0x1C
+    // Right dial (feed rate/step size) valid values: 0x0D, 0x0E, 0x0F, 0x10, 0x1A, 0x1B, 0x9B
     switch (value) {
       case 0x0D: return DialPosition.Rate2Percent;
       case 0x0E: return DialPosition.Rate5Percent;
@@ -127,8 +127,11 @@ export class PendantInputData {
       case 0x10: return DialPosition.Rate30Percent;
       case 0x1A: return DialPosition.Rate60Percent;
       case 0x1B: return DialPosition.Rate100Percent;
-      case 0x1C: return DialPosition.Lead;
-      default: return DialPosition.Unknown;
+      case 0x9B: return DialPosition.Lead;
+      default: 
+        // Debug: log unknown right dial values to help identify the issue
+        log.info(LOGPREFIX, `Unknown right dial value: 0x${value.toString(16).padStart(2, '0').toUpperCase()} (${value})`);
+        return DialPosition.Unknown;
     }
   }
 
@@ -142,7 +145,10 @@ export class PendantInputData {
       case 0x14: return DialPosition.A;
       case 0x15: return DialPosition.B;
       case 0x16: return DialPosition.C;
-      default: return DialPosition.Unknown;
+      default: 
+        // Debug: log unknown left dial values to help identify the issue
+        log.info(LOGPREFIX, `Unknown left dial value: 0x${value.toString(16).padStart(2, '0').toUpperCase()} (${value})`);
+        return DialPosition.Unknown;
     }
   }
 }
