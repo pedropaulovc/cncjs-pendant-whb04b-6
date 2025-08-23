@@ -1,13 +1,12 @@
-Generic Gamepad Support for CNC.js
-==================================
+WHB04B-6 CNC Pendant Support for CNC.js
+========================================
 
  [1]: https://cnc.js.org
  [2]: https://github.com/cncjs/cncjs-pendant-ps3
  [3]: https://github.com/cmidgley/cncjs-pendant-ps3
  [4]: https://github.com/balthisar/cncjs-pendant-gamepad
- [5]: http
 
-Provides support for the use of a generic gamepad as a wireless/Bluetooth or USB pendant for [CNC.js][1], allowing for operations like jogging, homing and managing jobs.
+Provides support for the WHB04B-6 CNC pendant controller as a wireless USB pendant for [CNC.js][1], allowing for operations like jogging, homing, probing, and managing jobs.
 
 
 Controller Support
@@ -16,184 +15,191 @@ Controller Support
 **Currently, only grbl is officially supported. _Please help_.** It’s highly likely that Marlin works (it looks okay, but I only use Marlin with a printer, so I can’t test it), but I have no idea how to implement/test Smoothieware and TinyG controllers. Please feel free to fork and tweak and submit a PR, or send me a controller. Confirmation that Marlin is good to go would be appreciated, too.
 
 
-Fork Information
-----------------
-
-This is a continuing fork of the original [cncjs-pendant-ps3 by Austin St. Aubin][2] and [the updated but unfinished fork by Chris Midgley][3], and is currently maintained [here][4].
-
-This and previous forks intend to add the following features:
-
-- Works with any gamepad.
-
-    - Don’t have a supported gamepad? Consider adding one - it’s easy! Look
-      at `src/gamepad_controller.ts` for an example.
-      
-- Abstracted gcode to allow for support of different controllers and machines
-
-    - Currently supports Grbl and Marlin
-    
-    - Don’t have the controller you need?  Consider adding one - it’s easy!
-      Look at `src/gcode-marlin.ts` for an example.
-      
-- Added debugging features (see `simulate` command and `--verbose` flag).
-
-- Auto-reconnect to pendant if connection fails.
-
-- Specify the z-probe touch plate thickness on the command line, if needed.
-
-- More intuitive button mapping versus the original -ps3 version of this.
-
-- Grbl-specific enhancements (because they're what I can test):
-
-  - Improved Z probing precision.
-
-  - Improved jogging using jogging-specific movement syntax.
-
-Note also that this fork is in mid-transition to conversion to TypeScript. It’s
-not complete, and real programming discipline will be added incrementally.
-
-
-Button Map
-----------
-
-Button mapping is as shown below. It’s significantly different than the default button mapping used in the original PS3 version of this pendant. It reflects how I use my machine, and it’s fairly easy to make changes to suit your own tastes in any case.
-
-![Button Map](images/cncjs-pendant-gamepad.png)
-
-
-Gamepad Setup
--------------
-
-You should ensure that your operating system is already setup to recognize and use the gamepad of your choice. Consult the internet if you need help in this regard.
-
-### Quick Connection Test 
-
-You can quickly test connectivity to your gamepad by performing:
-
-    ls /dev/input
-
-If this works, you should see something like this (most importantly, the `js0`):
-
-    $ ls /dev/input
-    event0  event1  event2  js0  mice  mouse0
-
-If the gamepad is not connected, you might see:
-
-    $ ls /dev/input
-    event0  mice  mouse0
-
-
-### Test using the joystick application
-
-    # Install
-    sudo apt-get -y install joystick
-
-    # Usage / Test
-    jstest /dev/input/js0
-
-You will see a live output of the various switches and joysticks, and can test the operation of the joystick.  Break out with `Ctrl-C` when done.
-
-
-Installation
-------------
-
-Maybe I’ll add this to NPM when some type of stability is achieved, but for now, I recommend running locally so that you can tweak things.
-
-Just like CNCjs, this pendant is a Node.js script, so it’s likely you already have a working Node.js installation. This pendant is developed with Node.js 16, which is the newest LTS version as of this writing. Note that CNCjs works quite well on this version of Node.js.
-
-    git clone https://github.com/balthisar/cncjs-pendant-gamepad.git && cd cncjs-pendant-gamepad
-    npm install
-
-Running this way, the main script won’t be in your path, so you can start it directly from the `bin/` directory:
-
-    bin/cncjs-pendant-gamepad.js -p /dev/ttyUSB0 -b 115200 -t grbl -vv run 
-
-
-Running cncjs-pendant-gamepad
------------------------------
-
-The program accepts several optional arguments. Too see all options run:
-
-    cncjs-pendant-gamepad.js --help
-
-The most important options are `--port (-p)` to specify the communications port to the controller, `--baudrate (-b)` to specify the connection speed, and `--controller-type (-t)` to specify the type of controller you are running (Marlin, Grbl, etc).
-
-Here is how those options are used. If CNC.js is already connected, the port is used to locate the existing connection and no reconnection or change is made to baudrate or controller.  However, if CNC.js is not connected, then these parameters are used to establish a connection to the controller.
-
-To start the pendant server, run a command similar to this:
-
-    cncjs-pendant-gamepad.js -p /dev/ttyUSB0 -b 115200 -t grbl run
-
-
-Configuration Files
+Project Information
 -------------------
 
-You can use a JSON configuration file instead of or in addition to the command line parameters. CLI parameters, if used, will override anything in the configuration file. This file must be named `.cncjs-pendant-gamepad.rc.json` and be present in your top level home directory (for example, `/Home/johnny/.cncjs-pendant-gamepad.rc.json`). Additionally/alternatively, Unix systems will look for `cncjs-pendant-gamepad.rc.json` in `/etc/`. JSON keys are:
+This project is adapted from the original [cncjs-pendant-ps3 by Austin St. Aubin][2] and [the gamepad fork by Chris Midgley][3], but has been completely rewritten to support the WHB04B-6 CNC pendant controller.
 
-  - accessTokenLifetime
-  - actionsMap (coming soon)
-  - baudrate
-  - controllerType
-  - port
-  - secret
-  - socketAddress
-  - socketPort
-  - verbose
-  - zProbeThickness
+## Features
+
+- **Direct WHB04B-6 Support**: Native USB HID communication with WHB04B-6 pendant (no vendor DLL required)
+- **Real-time Input Processing**: Continuously polls pendant for button presses, dial positions, and jog wheel movements  
+- **Display Output**: Sends coordinate data and control information to the pendant's LCD display
+- **CNC Controller Support**: Supports both Grbl and Marlin controllers
+- **Debugging Features**: Simulate mode and verbose logging for troubleshooting
+- **Auto-reconnect**: Automatically reconnects to pendant if connection fails
+- **Cross-platform**: Works on Windows, Linux, and macOS
+
+## WHB04B-6 Pendant Features
+
+- **16 Programmable Buttons**: Reset, Stop, Start/Pause, Feed+/-, Spindle+/-, Homing, Probing, etc.
+- **Dual Dial Controls**: Left dial for axis selection (X/Y/Z/A/B/C), Right dial for feed rate/step size
+- **Jog Wheel**: Precision jog wheel with encoder for smooth movement control
+- **LCD Display**: Shows coordinates, jog mode, feed rate, and spindle speed
+- **Multiple Jog Modes**: Continuous and Step modes for different machining needs
+
+## Hardware Requirements
+
+- WHB04B-6 wireless CNC pendant controller
+- USB receiver/controller for the pendant (typically included)
+- Compatible with Windows, Linux, and macOS
+
+## Button Layout
+
+The WHB04B-6 pendant provides 16 programmable buttons with the following default mapping:
+
+| Button | Function | Description |
+|--------|----------|-------------|
+| Reset | Key1 | Emergency reset/stop |
+| Stop | Key2 | Stop current operation |
+| Start/Pause | Key3 | Start or pause job |
+| Feed+ | Key4 | Increase feed rate |
+| Feed- | Key5 | Decrease feed rate |
+| Spindle+ | Key6 | Increase spindle speed |
+| Spindle- | Key7 | Decrease spindle speed |
+| M-Home | Key8 | Machine home all axes |
+| Safe-Z | Key9 | Move to safe Z position |
+| W-Home | Key10 | Workpiece coordinate home |
+| S on/off | Key11 | Spindle on/off toggle |
+| Fn | Key12 | Function key (reserved) |
+| Probe-Z | Key13 | Z-axis touch probe |
+| Macro-10 | Key14 | User macro (reserved) |
+| Continuous | Key15 | Continuous jog mode |
+| Step | Key16 | Step jog mode |
+
+## Pendant Setup
+
+The WHB04B-6 pendant should be automatically detected when connected via USB. The pendant uses HID (Human Interface Device) protocol and doesn't require special drivers on most operating systems.
 
 
-First use recommendation
-------------------------
+## Installation
 
-I recommend running `cncjs-pendant-gamepad` using the `simulate` command, as you can see the commands being sent (such as gcode or operations such as stop) without moving the actual gantry.  This is very useful to prove that everything is working and helps as a teaching aid while getting used to using the controls.
+This pendant requires Node.js 16 or later. Ensure you have a working Node.js installation that's compatible with CNCjs.
+
+    git clone https://github.com/your-repo/cncjs-pendant-whb04b-6.git && cd cncjs-pendant-whb04b-6
+    npm install
+
+The main script will be available in the `bin/` directory:
+
+    bin/cncjs-pendant-whb04b-6.js -p /dev/ttyUSB0 -b 115200 -t grbl run 
+
+## Running cncjs-pendant-whb04b-6
+
+To see all available options:
+
+    cncjs-pendant-whb04b-6.js --help
+
+### Key Options
+
+- `--port (-p)`: Serial port path to the CNC controller (e.g., `/dev/ttyUSB0`)
+- `--baudrate (-b)`: Baud rate for the serial connection (e.g., `115200`)
+- `--controller-type (-t)`: Controller type (`grbl` or `marlin`)
+- `--verbose (-v)`: Enable verbose logging (use `-vv` or `-vvv` for more detail)
+
+### Basic Usage
+
+Start the pendant server:
+
+    cncjs-pendant-whb04b-6.js -p /dev/ttyUSB0 -b 115200 -t grbl run
+
+For testing without a real CNC machine:
+
+    cncjs-pendant-whb04b-6.js simulate -vv
 
 
-Configuring for auto-start
---------------------------
+## Configuration Files
 
-Assuming you’ve got CNCjs set to autostart according to its own instructions, the simplest way to autostart this pendant is do use PM2, too:
+You can use a JSON configuration file instead of or in addition to command line parameters. CLI parameters will override settings in the configuration file.
 
-    pm2 start --name pendant $(which node) -- $(which cncjs-pendant-gamepad) -p /dev/ttyUSB0 -b 115200 -t grbl -vvv
+Configuration files are searched in the following order:
+- `~/.cncjs-pendant-whb04b-6.rc.json` (user home directory)
+- `/etc/cncjs-pendant-whb04b-6.rc.json` (system-wide, Unix only)
+
+Available JSON configuration keys:
+- `accessTokenLifetime`: Access token lifetime for CNCjs connection
+- `baudrate`: Serial port baud rate
+- `controllerType`: CNC controller type (`grbl` or `marlin`)
+- `port`: Serial port path
+- `secret`: CNCjs access secret
+- `socketAddress`: CNCjs server address (default: `localhost`)
+- `socketPort`: CNCjs server port (default: `8000`)
+- `verbose`: Logging verbosity level
+- `zProbeThickness`: Touch plate thickness for Z-probing (in mm)
+
+
+## First Use Recommendation
+
+We highly recommend running `cncjs-pendant-whb04b-6` in `simulate` mode first. This allows you to see the commands being sent (G-code and operations) without moving the actual machine. It's very useful to verify everything is working and helps you learn the pendant controls safely.
+
+    cncjs-pendant-whb04b-6.js simulate -vv
+
+## Configuring for Auto-start
+
+If you have CNCjs configured to autostart, you can use PM2 to autostart the pendant as well:
+
+    pm2 start --name whb04b-pendant $(which node) -- $(which cncjs-pendant-whb04b-6) -p /dev/ttyUSB0 -b 115200 -t grbl -vv
     pm2 save
 
-
-Tweaking/Customizing
---------------------
+## Development
 
 ### Building
 
-This pendant is written using TypeScript, which is a Javascript superset. The source code in `src/` can be compiled into plain Javascript by:
+This pendant is written in TypeScript. The source code in `src/` can be compiled to JavaScript by:
 
-    tsc
-
-If nothing seems to happen, delete the `tsconfig.tsbuildinfo` file, which holds incremental build information.
+    npm run build-ts
 
 ### Code Overview
 
-Tweaking should be relatively straight forward. The code is liberally commented, and interesting constants are at the top of files.
+The codebase is modular and well-commented:
 
-- `cncjs-pendant-gamepad.js` (in the `/bin` directory) simply calls `console`.
-
-- `console` handles the command line interface and creates the rest of the program.
-
-- `gamepad_controller` receives input from a game controller and creates events based on them.
-
-- `actions` receives events from the controller, and contains the logic for making requests of the gcode sender.
-
-- `gcode-sender` is the base class for controller-specific gcode senders. It contains methods that control CNCjs and/or your controller.
+- `bin/cncjs-pendant-whb04b-6.js` - Main entry point
+- `src/console.ts` - Command line interface and program initialization  
+- `src/whb04b_controller.ts` - WHB04B-6 pendant HID communication and input processing
+- `src/whb04b_actions.ts` - Event handling and CNC operation mapping
+- `src/connector.ts` - CNCjs WebSocket connection management
+- `src/gcode-sender.ts` - Base class for CNC controller communication
+- `src/gcode-grbl.ts` / `src/gcode-marlin.ts` - Controller-specific implementations
 
 
-### Adding game controllers
+### Adding CNC Controllers
 
-You can run in `simulate` mode with lots of verbosity (`-vvv`) to have a look at keycodes for your particular controller. Then you can add it to the `controllerMapping` structure in the `gamepad_controller.ts` file.
+To add support for additional CNC controllers:
 
+1. Create a new class extending `GcodeSender` (see `gcode-grbl.ts` and `gcode-marlin.ts` as examples)
+2. Override methods specific to your controller's G-code dialect
+3. Update the CLI in `console.ts` to include your controller option
+4. Add the controller to the factory method in `whb04b_actions.ts`
 
-### Adding CNC controllers
+Contributions for Smoothieware and TinyG support would be appreciated!
 
-You should subsclass from the `GcodeSender` class and override the default implementation of methods that aren’t suitable for your own machine.
+## Troubleshooting
 
-You should also update the CLI in `console` so that you can select the new machine.
+### Pendant Not Detected
 
-Finally, in `actions` you can see how `GcodeGrbl` and `GcodeMarlin` are included and instantiated, and do the same for your new class.
+If the WHB04B-6 pendant is not detected:
 
-Supporting Smoothieware and TinyG should be priorities, and any changes to Marlin that are needed would be appreciated,.
+1. Ensure the pendant is powered on and the USB receiver is connected
+2. Check that the pendant is paired with the USB receiver 
+3. Verify USB permissions (may require running as sudo on some Linux systems)
+4. Try different USB ports or use a USB 2.0 port if having issues with USB 3.0
+
+### Connection Issues
+
+- Ensure CNCjs is running and accessible at the configured address/port
+- Check firewall settings that might block WebSocket connections
+- Verify the serial port path and permissions for your CNC controller
+
+## License
+
+See LICENSE file for details.
+
+## Acknowledgments
+
+This implementation is based on:
+
+- Original [cncjs-pendant-ps3](https://github.com/cncjs/cncjs-pendant-ps3) by Austin St. Aubin
+- [Gamepad pendant fork](https://github.com/cmidgley/cncjs-pendant-ps3) by Chris Midgley
+- LinuxCNC xhc-whb04b-6 component for USB protocol reverse engineering
+- WHB04B-6 C# implementation in the `whb04b-6/` directory
+
+**Note:** This project is not associated with or endorsed by Chengdu Xinhecheng Technology Co., Ltd.
