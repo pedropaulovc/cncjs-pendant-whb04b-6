@@ -7,12 +7,12 @@
 // Copyright (c) 2017-2022 various contributors. See LICENSE for copyright
 // and MIT license information.
 
-import { Options }                                                           from './console';
+import { Options }                                                           from './console.js';
 import { GcodeSender }                                                       from './gcode-sender.js';
 import { GcodeGrbl }                                                         from './gcode-grbl.js';
 import { GcodeMarlin }                                                       from './gcode-marlin.js';
-import { Connector }                                                         from './connector';
-import { WHB04BController, WHB04BState, PendantInputData, KeyPressed, DialPosition, PendantDisplayData, JogMode, CoordinateSystem } from './whb04b_controller';
+import { Connector }                                                         from './connector.js';
+import { WHB04BController, WHB04BState, PendantInputData, KeyPressed, DialPosition, PendantDisplayData, JogMode, CoordinateSystem } from './whb04b_controller.js';
 
 import log from 'npmlog';
 import fs from 'fs';

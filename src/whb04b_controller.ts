@@ -6,7 +6,7 @@
 //
 // Based on the LinuxCNC xhc-whb04b-6 component and C# WHB04BClient implementation
 
-import { Options } from './console';
+import { Options } from './console.js';
 import { EventEmitter } from 'events';
 import HID from 'node-hid';
 import log from "npmlog";
@@ -183,8 +183,10 @@ export class PendantDisplayData {
     this.data.writeUInt32LE(xCoord, offset);
     offset += 4;
     const yCoord = formatCoordinate(y);
-    this.data.writeUInt24LE(yCoord & 0xFFFFFF, offset);
-    offset += 3;
+    // Manually write 3 bytes for Y coordinate (no writeUInt24LE)
+    this.data.writeUInt8((yCoord >> 0) & 0xFF, offset++);
+    this.data.writeUInt8((yCoord >> 8) & 0xFF, offset++);
+    this.data.writeUInt8((yCoord >> 16) & 0xFF, offset++);
 
     // Block 3 (7 bytes): Z coordinate, feed rate, and spindle rate
     const zCoord = formatCoordinate(z);

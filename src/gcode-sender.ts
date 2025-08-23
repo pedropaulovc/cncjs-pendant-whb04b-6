@@ -261,6 +261,16 @@ export class GcodeSender {
   }
 
 
+  //--------------------------------------------------
+  // Jog move for pendant use - relative movement
+  //--------------------------------------------------
+  jogMove(x: number, y: number, z: number): void {
+    if (x !== 0 || y !== 0 || z !== 0) {
+      const feedRate = 1000; // Default feed rate for jogging
+      this.moveGantryRelative(x, y, z, feedRate);
+    }
+  }
+
   //--------------------------------------------------------------------------
   // Handles sending messages to the cncjs socket server, or displaying
   // on screen when using `--fake-socket` option.
