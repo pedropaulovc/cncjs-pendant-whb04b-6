@@ -26,7 +26,9 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "prepare": "npm run build-ts && npm run copy-files",
     "build-ts": "tsc",
-    "copy-files": "cpy 'src/*.json' lib"
+    "copy-files": "cpy 'src/*.json' lib",
+    "simulate": "node bin/cncjs-pendant-whb04b-6.js simulate -vv",
+    "start": "node bin/cncjs-pendant-whb04b-6.js run"
   },
   "dependencies": {
     "commander": "^9.0.0",
