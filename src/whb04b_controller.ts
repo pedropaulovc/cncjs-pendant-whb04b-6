@@ -203,7 +203,7 @@ export class PendantDisplayData {
 }
 
 //------------------------------------------------------------------------------
-// WHB04B Controller State interface (compatible with gamepad interface)
+// WHB04B Controller State interface (compatible with original controller interface)
 //------------------------------------------------------------------------------
 export interface WHB04BState {
   id: number;
@@ -259,7 +259,7 @@ export class WHB04BController extends EventEmitter {
       // Start polling
       this.startPolling();
       
-      // Emit attach event for compatibility with gamepad interface
+      // Emit attach event for compatibility with original controller interface
       this.emit('attach', 0, this.getState());
 
     } catch (error) {
@@ -394,7 +394,7 @@ export class WHB04BController extends EventEmitter {
   }
 
   //----------------------------------------------------------------------------
-  // Gamepad compatibility interface
+  // Controller compatibility interface
   //----------------------------------------------------------------------------
   public isConnected(): boolean {
     return this.connected;

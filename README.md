@@ -18,7 +18,7 @@ Controller Support
 Project Information
 -------------------
 
-This project is adapted from the original [cncjs-pendant-ps3 by Austin St. Aubin][2] and [the gamepad fork by Chris Midgley][3], but has been completely rewritten to support the WHB04B-6 CNC pendant controller.
+This project is adapted from the original [cncjs-pendant-ps3 by Austin St. Aubin][2] and [the generic gamepad pendant fork by Chris Midgley][3], but has been completely rewritten to support the WHB04B-6 CNC pendant controller.
 
 ## Features
 

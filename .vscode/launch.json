@@ -12,7 +12,7 @@
             "skipFiles": [
                 "<node_internals>/**"
             ],
-            "program": "${workspaceFolder}/bin/cncjs-pendant-gamepad",
+            "program": "${workspaceFolder}/bin/cncjs-pendant-whb04b-6.js",
             "args": ["-p", "/dev/ttyUSB0", "-b", "115200", "-t", "grbl", "-v", "simulate"]
         },
         {
@@ -23,7 +23,7 @@
             "skipFiles": [
                 "<node_internals>/**"
             ],
-            "program": "${workspaceFolder}/bin/cncjs-pendant-gamepad",
+            "program": "${workspaceFolder}/bin/cncjs-pendant-whb04b-6.js",
             "args": ["-p", "/dev/ttyUSB0", "-b", "115200", "-t", "grbl", "-v"]
         },
         {
@@ -34,7 +34,7 @@
             "skipFiles": [
                 "<node_internals>/**"
             ],
-            "program": "${workspaceFolder}/bin/cncjs-pendant-gamepad",
+            "program": "${workspaceFolder}/bin/cncjs-pendant-whb04b-6.js",
             "args": ["-V"]
         },
     ]
