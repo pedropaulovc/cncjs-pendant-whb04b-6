@@ -18,7 +18,11 @@ Controller Support
 Project Information
 -------------------
 
-This project is adapted from the original [cncjs-pendant-ps3 by Austin St. Aubin][2] and [the generic gamepad pendant fork by Chris Midgley][3], but has been completely rewritten to support the WHB04B-6 CNC pendant controller.
+This project is primarily adapted from **[Jim Derry's cncjs-pendant-gamepad][4]**, which provided the foundational architecture and CNCjs integration patterns that made this WHB04B-6 implementation possible. Jim Derry's gamepad pendant project itself was based on the original [cncjs-pendant-ps3 by Austin St. Aubin][2] and [Chris Midgley's fork][3]. 
+
+While the WHB04B-6 implementation required complete rewriting of the HID communication layer and pendant-specific logic, the core CNCjs integration, G-code handling, and controller abstraction patterns were directly inherited from Jim Derry's excellent work. This project would not have been possible without that solid foundation.
+
+The codebase has been extensively modified to support the WHB04B-6's unique USB HID protocol, LCD display communication, and specific button/dial layout, but maintains the same modular architecture and CNCjs integration approach pioneered in the gamepad pendant.
 
 ## Features
 
@@ -219,11 +223,17 @@ See LICENSE file for details.
 
 ## Acknowledgments
 
-This implementation is based on:
+This project stands on the shoulders of several excellent open source projects:
 
-- Original [cncjs-pendant-ps3](https://github.com/cncjs/cncjs-pendant-ps3) by Austin St. Aubin
-- [Gamepad pendant fork](https://github.com/cmidgley/cncjs-pendant-ps3) by Chris Midgley
-- LinuxCNC xhc-whb04b-6 component for USB protocol reverse engineering
-- WHB04B-6 C# implementation in the `whb04b-6/` directory
+### Primary Foundation
+- **[cncjs-pendant-gamepad](https://github.com/balthisar/cncjs-pendant-gamepad) by Jim Derry** - This project provided the primary codebase foundation that this WHB04B-6 implementation was adapted from. Jim Derry's work established the excellent modular architecture, CNCjs integration patterns, controller abstraction layer, and overall project structure that made this WHB04B-6 pendant possible. The core design patterns, WebSocket handling, G-code abstraction, and configuration management were all inherited from Jim's gamepad pendant work. This project would not exist without that solid foundation.
+
+### Additional Recognition
+- **[cncjs-pendant-ps3](https://github.com/cncjs/cncjs-pendant-ps3) by Austin St. Aubin** - The original CNCjs pendant implementation that started the pendant ecosystem
+- **[Chris Midgley's PS3 pendant fork](https://github.com/cmidgley/cncjs-pendant-ps3)** - Important enhancements and improvements to the PS3 pendant
+- **LinuxCNC xhc-whb04b-6 component** - Critical reference for reverse engineering the WHB04B-6 USB protocol
+- **WHB04B-6 C# implementation** (included in `whb04b-6/` directory) - Additional protocol reference
+
+**Special Thanks:** Jim Derry's gamepad pendant project deserves particular recognition not just for code reuse, but for demonstrating how to properly architect a CNCjs pendant integration. The clean separation of concerns, robust error handling, configuration management, and modular controller support established in that project made adapting it for the WHB04B-6's unique requirements straightforward and maintainable.
 
 **Note:** This project is not associated with or endorsed by Chengdu Xinhecheng Technology Co., Ltd.
