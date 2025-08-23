@@ -284,8 +284,8 @@ export class WHB04BController extends EventEmitter {
         log.info(LOGPREFIX, `Checking device path: ${device.path}`);
       }
       
-      // Check if this is an input device (col01)
-      if (device.path && device.path.includes('col01') && !this.inputDevice) {
+      // Check if this is an input device (Col01)
+      if (device.path && device.path.toLowerCase().includes('col01') && !this.inputDevice) {
         try {
           this.inputDevice = new HID.HID(device.path);
           log.info(LOGPREFIX, `Input device opened: ${device.path}`);
@@ -294,8 +294,8 @@ export class WHB04BController extends EventEmitter {
         }
       }
       
-      // Check if this is an output device (col02)  
-      if (device.path && device.path.includes('col02') && !this.outputDevice) {
+      // Check if this is an output device (Col02)  
+      if (device.path && device.path.toLowerCase().includes('col02') && !this.outputDevice) {
         try {
           this.outputDevice = new HID.HID(device.path);
           log.info(LOGPREFIX, `Output device opened: ${device.path}`);
