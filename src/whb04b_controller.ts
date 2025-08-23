@@ -218,7 +218,8 @@ export interface WHB04BState {
 //------------------------------------------------------------------------------
 export class WHB04BController extends EventEmitter {
   private options: Options;
-  private device: HID.HID | null = null;
+  private inputDevice: HID.HID | null = null;
+  private outputDevice: HID.HID | null = null;
   private pollingTimer: NodeJS.Timer | null = null;
   private previousData: Buffer | null = null;
   private connected = false;
@@ -237,7 +238,7 @@ export class WHB04BController extends EventEmitter {
   //----------------------------------------------------------------------------
   private connectDevice(): void {
     try {
-      // Find WHB04B-6 device
+      // Find all WHB04B-6 devices
       const devices = HID.devices().filter(d => 
         d.vendorId === WHB04B_VENDOR_ID && d.productId === WHB04B_PRODUCT_ID
       );
@@ -248,11 +249,17 @@ export class WHB04BController extends EventEmitter {
         return;
       }
 
-      const deviceInfo = devices[0];
-      log.info(LOGPREFIX, `Found WHB04B-6 pendant: ${deviceInfo.product || 'Unknown'}`);
+      log.info(LOGPREFIX, `Found ${devices.length} WHB04B-6 HID endpoint(s)`);
 
-      // Open HID device
-      this.device = new HID.HID(deviceInfo.path!);
+      // Find input and output devices based on path patterns
+      this.findInputOutputDevices(devices);
+      
+      if (!this.inputDevice || !this.outputDevice) {
+        log.error(LOGPREFIX, 'Could not find both input and output devices');
+        this.scheduleReconnect();
+        return;
+      }
+
       this.connected = true;
       this.deviceCount = 1;
 
@@ -265,6 +272,49 @@ export class WHB04BController extends EventEmitter {
     } catch (error) {
       log.error(LOGPREFIX, `Failed to connect to WHB04B-6: ${error}`);
       this.scheduleReconnect();
+    }
+  }
+
+  private findInputOutputDevices(devices: HID.Device[]): void {
+    // On Windows, WHB04B-6 creates separate HID endpoints:
+    // - col01 (collection 1) for input data
+    // - col02 (collection 2) for output data
+    for (const device of devices) {
+      if (this.options.verbose >= 2) {
+        log.info(LOGPREFIX, `Checking device path: ${device.path}`);
+      }
+      
+      // Check if this is an input device (col01)
+      if (device.path && device.path.includes('col01') && !this.inputDevice) {
+        try {
+          this.inputDevice = new HID.HID(device.path);
+          log.info(LOGPREFIX, `Input device opened: ${device.path}`);
+        } catch (error) {
+          log.warn(LOGPREFIX, `Failed to open input device: ${error}`);
+        }
+      }
+      
+      // Check if this is an output device (col02)  
+      if (device.path && device.path.includes('col02') && !this.outputDevice) {
+        try {
+          this.outputDevice = new HID.HID(device.path);
+          log.info(LOGPREFIX, `Output device opened: ${device.path}`);
+        } catch (error) {
+          log.warn(LOGPREFIX, `Failed to open output device: ${error}`);
+        }
+      }
+    }
+    
+    // Fallback: if we only found one device, use it for both
+    if (!this.inputDevice && !this.outputDevice && devices.length > 0) {
+      try {
+        const device = devices[0];
+        this.inputDevice = new HID.HID(device.path!);
+        this.outputDevice = this.inputDevice; // Use same device for both
+        log.info(LOGPREFIX, `Using single device for both input and output: ${device.path}`);
+      } catch (error) {
+        log.error(LOGPREFIX, `Failed to open fallback device: ${error}`);
+      }
     }
   }
 
@@ -290,13 +340,13 @@ export class WHB04BController extends EventEmitter {
   }
 
   private pollDevice(): void {
-    if (!this.device || !this.connected) {
+    if (!this.inputDevice || !this.connected) {
       return;
     }
 
     try {
       // Read HID input report
-      const data = this.device.readTimeout(INPUT_PACKET_SIZE);
+      const data = this.inputDevice.readTimeout(INPUT_PACKET_SIZE);
       
       if (data && data.length >= INPUT_PACKET_SIZE) {
         const inputBuffer = Buffer.from(data);
@@ -344,13 +394,13 @@ export class WHB04BController extends EventEmitter {
   // Display output
   //----------------------------------------------------------------------------
   public sendDisplayData(displayData: PendantDisplayData): void {
-    if (!this.device || !this.connected) {
+    if (!this.outputDevice || !this.connected) {
       log.warn(LOGPREFIX, 'Cannot send display data - device not connected');
       return;
     }
 
     try {
-      this.device.write(Array.from(displayData.rawData));
+      this.outputDevice.write(Array.from(displayData.rawData));
     } catch (error) {
       log.error(LOGPREFIX, `Failed to send display data: ${error}`);
     }
@@ -371,13 +421,22 @@ export class WHB04BController extends EventEmitter {
       this.connected = false;
       this.deviceCount = 0;
       
-      if (this.device) {
+      if (this.inputDevice) {
         try {
-          this.device.close();
+          this.inputDevice.close();
         } catch (error) {
           // Ignore close errors
         }
-        this.device = null;
+        this.inputDevice = null;
+      }
+      
+      if (this.outputDevice && this.outputDevice !== this.inputDevice) {
+        try {
+          this.outputDevice.close();
+        } catch (error) {
+          // Ignore close errors
+        }
+        this.outputDevice = null;
       }
 
       if (this.pollingTimer) {
@@ -423,13 +482,22 @@ export class WHB04BController extends EventEmitter {
       this.pollingTimer = null;
     }
 
-    if (this.device) {
+    if (this.inputDevice) {
       try {
-        this.device.close();
+        this.inputDevice.close();
       } catch (error) {
         // Ignore close errors
       }
-      this.device = null;
+      this.inputDevice = null;
+    }
+    
+    if (this.outputDevice && this.outputDevice !== this.inputDevice) {
+      try {
+        this.outputDevice.close();
+      } catch (error) {
+        // Ignore close errors
+      }
+      this.outputDevice = null;
     }
 
     this.connected = false;
