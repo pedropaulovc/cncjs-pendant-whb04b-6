@@ -29,24 +29,24 @@ const JOG_INTERVAL = 100;                    // ms/interval; there are 60,000 ms
 
 // Feed rates based on right dial position
 const FEED_RATES = {
-  [DialPosition.Position1]: 10,    // 0.001/2%
-  [DialPosition.Position2]: 50,    // 0.01/5%  
-  [DialPosition.Position3]: 100,   // 0.1/10%
-  [DialPosition.Position4]: 500,   // 1/30%
-  [DialPosition.Position5]: 1000,  // 60%
-  [DialPosition.Position6]: 2000,  // 100%
-  [DialPosition.Position7]: 3000,  // Lead
+  [DialPosition.Rate2Percent]: 50,     // 2%
+  [DialPosition.Rate5Percent]: 125,    // 5%  
+  [DialPosition.Rate10Percent]: 250,   // 10%
+  [DialPosition.Rate30Percent]: 750,   // 30%
+  [DialPosition.Rate60Percent]: 1500,  // 60%
+  [DialPosition.Rate100Percent]: 2500, // 100%
+  [DialPosition.Lead]: 3000,           // Lead/Manual
 };
 
 // Step distances based on right dial position  
 const STEP_DISTANCES = {
-  [DialPosition.Position1]: 0.001, // 0.001mm
-  [DialPosition.Position2]: 0.01,  // 0.01mm
-  [DialPosition.Position3]: 0.1,   // 0.1mm
-  [DialPosition.Position4]: 1.0,   // 1mm
-  [DialPosition.Position5]: 10.0,  // 10mm (60% setting used as 10mm)
-  [DialPosition.Position6]: 50.0,  // 50mm (100% setting used as 50mm)
-  [DialPosition.Position7]: 100.0, // 100mm (Lead setting used as 100mm)
+  [DialPosition.Rate2Percent]: 0.001,  // 0.001mm
+  [DialPosition.Rate5Percent]: 0.01,   // 0.01mm
+  [DialPosition.Rate10Percent]: 0.1,   // 0.1mm
+  [DialPosition.Rate30Percent]: 1.0,   // 1mm
+  [DialPosition.Rate60Percent]: 10.0,  // 10mm
+  [DialPosition.Rate100Percent]: 50.0, // 50mm
+  [DialPosition.Lead]: 100.0,          // 100mm (Lead setting)
 };
 
 //----------------------------------------------------------------------------
@@ -221,8 +221,8 @@ export class WHB04BActions {
   // Process jog wheel movement based on selected axis and feed rate
   //--------------------------------------------------------------------------
   private handleJogWheel(offset: number, leftDial: DialPosition, rightDial: DialPosition): void {
-    // Left dial determines axis (Position1 = Off)
-    if (leftDial === DialPosition.Position1) {
+    // Left dial determines axis (Off = no movement)
+    if (leftDial === DialPosition.Off) {
       return; // Off position - no movement
     }
     
@@ -244,12 +244,12 @@ export class WHB04BActions {
   //--------------------------------------------------------------------------
   private getAxisFromDial(dialPosition: DialPosition): string | null {
     switch (dialPosition) {
-      case DialPosition.Position2: return 'X';
-      case DialPosition.Position3: return 'Y';
-      case DialPosition.Position4: return 'Z';
-      case DialPosition.Position5: return 'A';
-      case DialPosition.Position6: return 'B';
-      case DialPosition.Position7: return 'C';
+      case DialPosition.X: return 'X';
+      case DialPosition.Y: return 'Y';
+      case DialPosition.Z: return 'Z';
+      case DialPosition.A: return 'A';
+      case DialPosition.B: return 'B';
+      case DialPosition.C: return 'C';
       default: return null;
     }
   }
@@ -259,7 +259,7 @@ export class WHB04BActions {
   // Handle continuous jogging based on jog wheel movement
   //--------------------------------------------------------------------------
   private handleContinuousJog(offset: number, axis: string, rightDial: DialPosition): void {
-    const feedRate = FEED_RATES[rightDial] || FEED_RATES[DialPosition.Position3]; // Default to 100mm/min
+    const feedRate = FEED_RATES[rightDial] || FEED_RATES[DialPosition.Rate10Percent]; // Default to 10%
     const direction = offset > 0 ? 1 : -1;
     const distance = Math.abs(offset) * 0.1 * direction; // Use small increments for continuous feel
     
@@ -289,7 +289,7 @@ export class WHB04BActions {
   // Handle step jogging based on jog wheel movement
   //--------------------------------------------------------------------------
   private handleStepJog(offset: number, axis: string, rightDial: DialPosition): void {
-    const stepDistance = STEP_DISTANCES[rightDial] || STEP_DISTANCES[DialPosition.Position3]; // Default to 0.1mm
+    const stepDistance = STEP_DISTANCES[rightDial] || STEP_DISTANCES[DialPosition.Rate10Percent]; // Default to 0.1mm
     const distance = Math.abs(offset) * stepDistance * (offset > 0 ? 1 : -1);
     
     let x = 0, y = 0, z = 0;
