@@ -7,7 +7,7 @@
 // Copyright (c) 2017-2022 various contributors. See LICENSE for copyright
 // and MIT license information.
 
-import { GamepadController }  from './gamepad_controller.js';
+import { WHB04BController }   from './whb04b_controller.js';
 import { Options }            from './console';
 import { clearInterval }      from 'timers';
 import * as fs                from 'fs';
@@ -38,20 +38,20 @@ const LOGPREFIX = 'CONNECTOR'; // keep at 9 digits for consistency
 // - When a controller is connected, it will signal callbacks.
 //----------------------------------------------------------------------------
 export class Connector {
-  gamepadController: GamepadController;
+  whb04bController: WHB04BController;
   serialConnected = false;
   options: Options;
   socket: io.Socket;
   serial: NodeJS.Timer;
   logPrefix: string;
-  awaitingString = 'Waiting for a game controller to be connected.';
+  awaitingString = 'Waiting for a WHB04B-6 pendant to be connected.';
   
-  constructor(gamepadController: GamepadController, options: Options) {
-    this.gamepadController = gamepadController;
+  constructor(whb04bController: WHB04BController, options: Options) {
+    this.whb04bController = whb04bController;
     this.options = options;
     this.logPrefix = options.simulate ? 'SIMULATOR' : LOGPREFIX;
 
-    if (!gamepadController.isConnected())
+    if (!whb04bController.isConnected())
       log.info(this.logPrefix, this.awaitingString);
 
     // When a device is connected and a socket is not already opened, then
@@ -60,23 +60,23 @@ export class Connector {
     // Note: we're deliberitely choosing to open a socket and serial
     //   connection only while a controller is connected. There's no reason
     //   to keep a socket and serial connection open needlessly, but also it
-    //   enables us to unplug and plug in the gamepad in order to kick off
-    //   reconnection attempts. Ironically, "unplug the joystick and plug it in
+    //   enables us to unplug and plug in the pendant in order to kick off
+    //   reconnection attempts. Ironically, "unplug the pendant and plug it in
     //   again" will be valid troubleshooting, but not for reasons end users
     //   might expect ;-)
-    gamepadController.on('attach', (id, state) => {
-      const numDevices = gamepadController.numDevices();
+    whb04bController.on('attach', (id, state) => {
+      const numDevices = whb04bController.numDevices();
       if (numDevices == 1) 
         this.connectServer();
       else 
-        log.warn(this.logPrefix, `There are ${numDevices} game controllers attached. Operate with caution!`);
+        log.warn(this.logPrefix, `There are ${numDevices} WHB04B-6 pendants attached. Operate with caution!`);
     });
 
 
-    // When the last game controller is disconnected, then close the socket and
+    // When the last WHB04B-6 pendant is disconnected, then close the socket and
     // serial connections, and then display the waiting message.
-    gamepadController.on('remove', (id, state) => {
-      const numDevices = gamepadController.numDevices();
+    whb04bController.on('remove', (id, state) => {
+      const numDevices = whb04bController.numDevices();
       if (numDevices < 1 && this.socket) {
         this.socket.destroy();
         clearInterval(this.serial);

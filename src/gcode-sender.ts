@@ -9,7 +9,6 @@
 
 import { Options }     from './console';
 import { Connector }   from './connector';
-import { Actions }     from './actions';
 import log from "npmlog";
 
 //------------------------------------------------------------------------------
@@ -17,6 +16,12 @@ import log from "npmlog";
 //------------------------------------------------------------------------------
 const LOGPREFIX = 'GCODESNDR'; // keep at 9 digits for consistency
 const ZSAFEPOS = -5.0;         // machine Z coordinate deemed safe for travel.
+
+// Interface that actions classes must implement to be used by GcodeSender
+interface ActionsInterface {
+  options: Options;
+  connector: Connector;
+}
 
 
 //------------------------------------------------------------------------------
@@ -28,7 +33,7 @@ export class GcodeSender {
   connector: Connector;
   zsafepos: number;
 
-  constructor(actions: Actions) {
+  constructor(actions: ActionsInterface) {
     this.options = actions.options;
     this.connector = actions.connector;
     this.zsafepos = ZSAFEPOS;

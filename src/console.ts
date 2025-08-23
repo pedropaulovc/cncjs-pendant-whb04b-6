@@ -9,10 +9,10 @@
 
 import { program, Option, Argument, Command } from 'commander';
 import { createRequire }                      from 'module';
-import { GamepadController }                  from './gamepad_controller.js';
+import { WHB04BController }                   from './whb04b_controller.js';
 import { Connector }                          from './connector.js';
-import { Actions }                            from "./actions.js";
-import { ActionsMappings }                    from "./actions.js";
+import { WHB04BActions }                      from "./whb04b_actions.js";
+import { ActionsMappings }                    from "./whb04b_actions.js";
 
 // These weird (old-fashioned?) imports are inherently singletons, and we're
 // not interested in eventually testing them anyway, so let's just use them
@@ -69,14 +69,14 @@ export function startCLI() {
   console.log(`${program.name()} is currently running. Stop running with Control-C`);
   console.log(`Use '${program.name()} --help' if you're expecting to see something else here.`);
 
-  log.trace(LOGPREFIX, 'Creating the GamepadController instance.');
-  const gamepadController = new GamepadController(options);
+  log.trace(LOGPREFIX, 'Creating the WHB04BController instance.');
+  const whb04bController = new WHB04BController(options);
 
   log.trace(LOGPREFIX, 'Starting the main connector service.');
-  const connector = new Connector(gamepadController, options);
+  const connector = new Connector(whb04bController, options);
 
-  log.trace(LOGPREFIX, 'Starting the actions service.');
-  new Actions(connector, options);
+  log.trace(LOGPREFIX, 'Starting the WHB04B actions service.');
+  new WHB04BActions(connector, options);
 }
 
 
@@ -92,8 +92,8 @@ function configureCLI(cli: Command, version: string) {
   cli
     .showHelpAfterError()
     .version(version)
-    .name('cncjs-pendant-gamepad')
-    .description('Use a supported game controller as a pendant to control CNCjs.')
+    .name('cncjs-pendant-whb04b-6')
+    .description('Use a WHB04B-6 CNC pendant controller to control CNCjs.')
     .usage('[options] [run|simulate]')
 
     .option('-p, --port <port>',                          'serial port path of cnc machine',                        '/dev/ttyUSB0')

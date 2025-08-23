@@ -12,7 +12,7 @@ import { GcodeSender }                     from './gcode-sender.js';
 import { GcodeGrbl }                       from './gcode-grbl.js';
 import { GcodeMarlin }                     from './gcode-marlin.js';
 import { Connector }                       from './connector';
-import { GamepadController, GamepadState } from './gamepad_controller';
+import { WHB04BController, WHB04BState, PendantInputData } from './whb04b_controller';
 
 import log from 'npmlog';
 import fs from 'fs';
@@ -64,12 +64,12 @@ export interface ActionsMappings {
 //------------------------------------------------------------------------------
 export class Actions {
   connector: Connector;                       // connection to CNCjs
-  gamepadController: GamepadController;       // connection to gamepad
+  whb04bController: WHB04BController;         // connection to WHB04B pendant
   options: Options;                           // program-wide options
   gcodeSender: GcodeSender;                   // abstraction interface
   jogTimer: NodeJS.Timer;                     // jog timer reference
 
-  gamepadState = {} as GamepadState;          // state of current controller
+  pendantState = {} as WHB04BState;           // state of current pendant
   axisInstructions = new XYZCoords();         // next jog movement instructions
   
   thumbRightActive = false;
@@ -80,11 +80,11 @@ export class Actions {
   //----------------------------------------------------------------------------
   constructor(connector: Connector, options: Options) {
     this.connector = connector;
-    this.gamepadController = connector.gamepadController;
+    this.whb04bController = connector.whb04bController;
     this.options = options;
     this.gcodeSender = this.newGcodeSender();
 
-    this.gamepadController.on('use', this.onUse.bind(this));
+    this.whb04bController.on('use', this.onUse.bind(this));
     this.jogTimer = setTimeout( this.jogFunction.bind(this), JOG_INTERVAL );
   }
 
