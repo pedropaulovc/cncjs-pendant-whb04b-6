@@ -2,7 +2,7 @@
 
 // console
 // A module that provides a command line interface to this package. It starts
-// all services such as the connector, gamepad controller, log system, etc.
+// all services such as the connector, WHB04B pendant controller, log system, etc.
 //
 // Copyright (c) 2017-2022 various contributors. See LICENSE for copyright
 // and MIT license information.
@@ -123,8 +123,11 @@ function loadOptionsFile(filename: any, optionsVersion : string) : Options {
     const rawData = fs.readFileSync(filename, "utf8");
     const result = JSON.parse(rawData)[optionsVersion];
     return result || {} as Options;
-  } catch (err) {
-    log.warn(LOGPREFIX, err);
+  } catch (err: any) {
+    // Only log warnings for parsing errors, not missing files
+    if (err.code !== 'ENOENT') {
+      log.warn(LOGPREFIX, `Error loading config file ${filename}: ${err.message}`);
+    }
     return {} as Options;
   }
 }
@@ -221,7 +224,7 @@ function configureLogging(options: Options) {
 function demoLogging() {
   log.trace('DRIVER   ', 'registers: pc=0402 sr=30 ac=00 xr=0 yr=0 sp=f7');
   log.debug('DRIVER   ', 'KEYCODE_BUTTON_L1: true');                        
-  log.info('','Waiting for a gamepad to be connected.');                  
+  log.info('','Waiting for a WHB04B-6 pendant to be connected.');                  
   log.warn('FRONTEND ', 'Password is weak.');
   log.error('CONNECTOR', 'Short circuit detected in operator.');
   log.silent('','You should never see this.');
