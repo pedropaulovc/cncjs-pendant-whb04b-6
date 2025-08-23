@@ -400,7 +400,47 @@ export class WHB04BController extends EventEmitter {
     }
 
     try {
-      this.outputDevice.write(Array.from(displayData.rawData));
+      const data = displayData.rawData;
+      
+      // Ensure data is exactly 21 bytes (3 blocks of 7 bytes each)
+      const paddedData = Buffer.alloc(21);
+      data.copy(paddedData, 0, 0, Math.min(data.length, 21));
+      
+      // Send data in 7-byte chunks with report ID, matching C# implementation
+      for (let i = 0; i < paddedData.length; i += 7) {
+        const block = Buffer.alloc(8); // 8 bytes total
+        block[0] = 0x06; // Report ID
+        
+        const bytesToCopy = Math.min(7, paddedData.length - i);
+        paddedData.copy(block, 1, i, i + bytesToCopy);
+        
+        if (this.options.verbose >= 3) {
+          log.info(LOGPREFIX, `Sending block ${Math.floor(i/7) + 1}: ${block.toString('hex')}`);
+        }
+        
+        // Try sendFeatureReport first (HID control transfer)
+        try {
+          this.outputDevice.sendFeatureReport(Array.from(block));
+          if (this.options.verbose >= 3) {
+            log.info(LOGPREFIX, `sendFeatureReport succeeded for block ${Math.floor(i/7) + 1}`);
+          }
+        } catch (featureError) {
+          if (this.options.verbose >= 3) {
+            log.info(LOGPREFIX, `sendFeatureReport failed for block ${Math.floor(i/7) + 1}, trying write...`);
+          }
+          
+          // Fallback to write
+          try {
+            this.outputDevice.write(Array.from(block));
+            if (this.options.verbose >= 3) {
+              log.info(LOGPREFIX, `write succeeded for block ${Math.floor(i/7) + 1}`);
+            }
+          } catch (writeError) {
+            log.error(LOGPREFIX, `Both sendFeatureReport and write failed for block ${Math.floor(i/7) + 1}: ${writeError}`);
+            throw writeError;
+          }
+        }
+      }
     } catch (error) {
       log.error(LOGPREFIX, `Failed to send display data: ${error}`);
     }
