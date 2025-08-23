@@ -1,0 +1,48 @@
+# This workflow creates releases when tags are pushed
+
+name: Release
+
+on:
+  push:
+    tags: [ "v*" ]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 8.0.x
+        
+    - name: Publish Linux x64
+      working-directory: src
+      run: dotnet publish --configuration Release --runtime linux-x64 --self-contained false
+      
+    - name: Publish Windows x64
+      working-directory: src
+      run: dotnet publish --configuration Release --runtime win-x64 --self-contained false
+      
+    - name: Create Linux ZIP Archive
+      working-directory: src/bin/Release/net8.0/linux-x64/publish
+      run: |
+        zip -r whb04b-6-${{ github.ref_name }}-linux-x64.zip .
+        
+    - name: Create Windows ZIP Archive
+      working-directory: src/bin/Release/net8.0/win-x64/publish
+      run: |
+        zip -r whb04b-6-${{ github.ref_name }}-win-x64.zip .
+        
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          src/bin/Release/net8.0/linux-x64/publish/whb04b-6-${{ github.ref_name }}-linux-x64.zip
+          src/bin/Release/net8.0/win-x64/publish/whb04b-6-${{ github.ref_name }}-win-x64.zip
+        draft: false
+        prerelease: false

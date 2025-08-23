@@ -1,0 +1,17 @@
+<Project>
+  <PropertyGroup>
+    <!-- Treat warnings as errors -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- Enable only specific code analysis rules -->
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisMode>Minimum</AnalysisMode>
+    <CodeAnalysisTreatWarningsAsErrors>true</CodeAnalysisTreatWarningsAsErrors>
+    <!-- Enforce EditorConfig rules during build -->
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+  </PropertyGroup>
+  
+  <!-- Disable most CA rules, keep only member ordering -->
+  <PropertyGroup>
+    <NoWarn>CA1008;CA1016;CA1027;CA1031;CA1032;CA1303;CA1710;CA1805;CA1819;CA1822;CA1848;CA1852;CA2000;CA2007</NoWarn>
+  </PropertyGroup>
+</Project>
