@@ -50,13 +50,24 @@ export enum KeyPressed {
 }
 
 export enum DialPosition {
-  Position1 = 1, // Left: Off,    Right: 0.001/2%
-  Position2 = 2, // Left: X,      Right: 0.01/5%
-  Position3 = 3, // Left: Y,      Right: 0.1/10%
-  Position4 = 4, // Left: Z,      Right: 1/30%
-  Position5 = 5, // Left: A,      Right: 60%
-  Position6 = 6, // Left: B,      Right: 100%
-  Position7 = 7, // Left: C,      Right: Lead
+  // Left Dial (Axis Selection) - actual hex values from WHB04B-6
+  Off = 0x06,     // Off position
+  X = 0x11,       // X axis
+  Y = 0x12,       // Y axis  
+  Z = 0x13,       // Z axis
+  A = 0x14,       // A axis
+  B = 0x15,       // B axis
+  C = 0x16,       // C axis
+  
+  // Right Dial (Feed Rate/Step Size) - actual hex values from WHB04B-6  
+  Rate2Percent = 0x0D,    // 2% / 0.001
+  Rate5Percent = 0x0E,    // 5% / 0.01
+  Rate10Percent = 0x0F,   // 10% / 0.1
+  Rate30Percent = 0x10,   // 30% / 1
+  Rate60Percent = 0x1A,   // 60%
+  Rate100Percent = 0x1B,  // 100%
+  Lead = 0x1C,            // Lead/Manual
+  
   Unknown = 255
 }
 
@@ -108,17 +119,31 @@ export class PendantInputData {
   }
 
   private parseRightDial(value: number): DialPosition {
-    if (value >= 1 && value <= 7) {
-      return value as DialPosition;
+    // Right dial (feed rate/step size) valid values: 0x0D, 0x0E, 0x0F, 0x10, 0x1A, 0x1B, 0x1C
+    switch (value) {
+      case 0x0D: return DialPosition.Rate2Percent;
+      case 0x0E: return DialPosition.Rate5Percent;
+      case 0x0F: return DialPosition.Rate10Percent;
+      case 0x10: return DialPosition.Rate30Percent;
+      case 0x1A: return DialPosition.Rate60Percent;
+      case 0x1B: return DialPosition.Rate100Percent;
+      case 0x1C: return DialPosition.Lead;
+      default: return DialPosition.Unknown;
     }
-    return DialPosition.Unknown;
   }
 
   private parseLeftDial(value: number): DialPosition {
-    if (value >= 1 && value <= 7) {
-      return value as DialPosition;
+    // Left dial (axis selection) valid values: 0x06, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16
+    switch (value) {
+      case 0x06: return DialPosition.Off;
+      case 0x11: return DialPosition.X;
+      case 0x12: return DialPosition.Y;
+      case 0x13: return DialPosition.Z;
+      case 0x14: return DialPosition.A;
+      case 0x15: return DialPosition.B;
+      case 0x16: return DialPosition.C;
+      default: return DialPosition.Unknown;
     }
-    return DialPosition.Unknown;
   }
 }
 
