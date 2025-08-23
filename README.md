@@ -12,7 +12,7 @@ Provides support for the WHB04B-6 CNC pendant controller as a wireless USB penda
 Controller Support
 ------------------
 
-**Currently, only grbl is officially supported. _Please help_.** It’s highly likely that Marlin works (it looks okay, but I only use Marlin with a printer, so I can’t test it), but I have no idea how to implement/test Smoothieware and TinyG controllers. Please feel free to fork and tweak and submit a PR, or send me a controller. Confirmation that Marlin is good to go would be appreciated, too.
+**Currently, only grbl is officially supported. _Please help_.** It's highly likely that Marlin works (it looks okay, but I only use Marlin with a printer, so I can't test it), but I have no idea how to implement/test Smoothieware and TinyG controllers. Please feel free to fork and tweak and submit a PR, or send me a controller. Confirmation that Marlin is good to go would be appreciated, too.
 
 
 Project Information
@@ -79,9 +79,27 @@ This pendant requires Node.js 16 or later. Ensure you have a working Node.js ins
     git clone https://github.com/your-repo/cncjs-pendant-whb04b-6.git && cd cncjs-pendant-whb04b-6
     npm install
 
-The main script will be available in the `bin/` directory:
+## Quick Start
 
-    bin/cncjs-pendant-whb04b-6.js -p /dev/ttyUSB0 -b 115200 -t grbl run 
+After installation, you can use these convenient npm scripts:
+
+### Testing Mode (Recommended First Use)
+```bash
+npm run simulate
+```
+This runs the pendant in simulation mode with verbose logging, allowing you to safely test all functions without moving your CNC machine. **Highly recommended before first use with a real machine.**
+
+### Normal Operation
+```bash
+npm run start
+```
+This starts the pendant for normal operation. You may need to configure connection settings via command line arguments or configuration file (see Configuration section below).
+
+### Custom Configuration
+For specific setups, you can still use the binary directly:
+```bash
+bin/cncjs-pendant-whb04b-6.js -p /dev/ttyUSB0 -b 115200 -t grbl run
+```
 
 ## Running cncjs-pendant-whb04b-6
 
@@ -96,15 +114,19 @@ To see all available options:
 - `--controller-type (-t)`: Controller type (`grbl` or `marlin`)
 - `--verbose (-v)`: Enable verbose logging (use `-vv` or `-vvv` for more detail)
 
-### Basic Usage
+### Basic Usage Examples
 
-Start the pendant server:
+Start the pendant server for production use:
 
     cncjs-pendant-whb04b-6.js -p /dev/ttyUSB0 -b 115200 -t grbl run
 
 For testing without a real CNC machine:
 
     cncjs-pendant-whb04b-6.js simulate -vv
+
+**Quick commands:**
+- `npm run simulate` - Safe testing mode with verbose output
+- `npm run start` - Normal operation mode
 
 
 ## Configuration Files
@@ -120,18 +142,20 @@ Available JSON configuration keys:
 - `baudrate`: Serial port baud rate
 - `controllerType`: CNC controller type (`grbl` or `marlin`)
 - `port`: Serial port path
-- `secret`: CNCjs access secret
 - `socketAddress`: CNCjs server address (default: `localhost`)
 - `socketPort`: CNCjs server port (default: `8000`)
+- `secret`: CNCjs access secret
 - `verbose`: Logging verbosity level
 - `zProbeThickness`: Touch plate thickness for Z-probing (in mm)
 
 
 ## First Use Recommendation
 
-We highly recommend running `cncjs-pendant-whb04b-6` in `simulate` mode first. This allows you to see the commands being sent (G-code and operations) without moving the actual machine. It's very useful to verify everything is working and helps you learn the pendant controls safely.
+We highly recommend running the pendant in simulate mode first using:
 
-    cncjs-pendant-whb04b-6.js simulate -vv
+    npm run simulate
+
+This allows you to see the commands being sent (G-code and operations) without moving the actual machine. It's very useful to verify everything is working and helps you learn the pendant controls safely.
 
 ## Configuring for Auto-start
 
