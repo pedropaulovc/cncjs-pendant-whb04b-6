@@ -9,9 +9,9 @@ runtime shift: WebHID exists only in Chromium browsers (Chrome / Edge / Opera)
 over a secure context, so the pendant moves from a standalone Node CLI to a web
 page rather than running headless under `node`.
 
-## What the current code does with `node-hid`
+## What the node-hid version did
 
-`src/whb04b_controller.ts` is the only file that touches hardware. It:
+The removed `src/whb04b_controller.ts` was the only file that touched hardware. It:
 
 1. enumerates devices by VID `0x10CE` / PID `0xEB93`;
 2. on Windows opens two HID paths (`col01` for input, `col02` for output);
@@ -21,7 +21,8 @@ page rather than running headless under `node`.
    followed by 7 data bytes.
 
 Everything else — `connector.ts` (socket.io to CNCjs), `whb04b_actions.ts`
-(input → jog/probe/home), `gcode-*.ts` — never touches the device.
+(input → jog/probe/home), `gcode-*.ts` — never touched the device, and that
+logic now lives in the browser widget (`web/widget/whb04b-widget.js`).
 
 ## Operation-by-operation mapping
 
@@ -42,17 +43,17 @@ WebHID port the report id is re-prepended to the input bytes before parsing, so
 the exact `data[2..6]` offsets from the original implementation still apply and
 the bytes put on the wire for the display are byte-for-byte identical.
 
-## What this branch adds
+## What replaced it
 
-- `src/whb04b_controller_webhid.ts` — a drop-in WebHID controller that keeps the
-  same public surface as `whb04b_controller.ts` (`on('attach'|'use'|'remove')`,
-  `sendDisplayData`, `clearDisplay`, `isConnected`, `numDevices`, `destroy`), so
-  `whb04b_actions.ts` can drive it unchanged in a browser build. Node-only deps
-  (`node-hid`, `npmlog`, `Buffer`) are replaced with WebHID, `console`, and
-  `Uint8Array`/`DataView`.
-- `web/whb04b-webhid.js` + `web/index.html` — a zero-build, dependency-free
-  tester that connects to a real pendant, shows live key/dial/jog input, and
-  pushes coordinates to the LCD. Open it from any `https`/`localhost` origin.
+The Node CLI (`bin/`, `console.ts`, `connector.ts`, `whb04b_actions.ts`,
+`gcode-*.ts`, `whb04b_controller.ts`) and the `node-hid`/`npmlog`/`commander`/
+`jsonwebtoken` dependencies have been removed. The implementation is now:
+
+- `web/whb04b-webhid.js` — a zero-build, dependency-free WebHID driver. It opens
+  the device, parses input reports, serializes LCD feature-report writes, and
+  auto-attaches/detaches via `navigator.hid` connect/disconnect events.
+- `web/index.html` — a standalone tester (live key/dial/jog readout, push to LCD).
+- `web/widget/` — the CNCjs custom widget (see below).
 
 ## Caveats
 
@@ -65,11 +66,12 @@ the bytes put on the wire for the display are byte-for-byte identical.
 - **OS access.** Linux needs a udev/hidraw rule; WebHID blocks protected
   top-level usages (keyboard/pointer), but the WHB04B-6 enumerates as a
   vendor-defined device so it is reachable.
-- **Full browser port.** `connector.ts`/`actions`/`gcode` are browser-portable
-  but still import `npmlog`/`fs`/`os` and the Node build of `socket.io-client`;
-  finishing a 100% in-browser pendant means swapping those for `console`, a
-  browser JWT, the socket.io browser bundle, and dropping the file-based config
-  loader. None of that is blocked by WebHID — it is ordinary bundling work.
+- **No headless mode.** Because WebHID needs a browser tab, there is no
+  headless/PM2 deployment as the old node-hid CLI had. As a CNCjs widget the
+  pendant lives in the browser the operator already has open, which sidesteps
+  this for the normal workflow.
+- **Auth.** The widget reuses the CNCjs session token from the parent frame, so
+  there is no JWT signing or `~/.cncrc` read — that node-only plumbing is gone.
 
 ## Running as a CNCjs custom widget (same origin)
 

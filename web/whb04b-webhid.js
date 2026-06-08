@@ -80,18 +80,31 @@ export class WHB04BWebHID extends EventTarget {
     this.connected = false;
     this._previous = null;
     this._onInput = (e) => this._handleInput(e);
+    // Serialize LCD writes: sendDisplayData is async and may be called
+    // un-awaited on every input event, so chain writes to stop the three
+    // feature reports of different frames interleaving on the device.
+    this._writeChain = Promise.resolve();
+    // React to physical plug/unplug of the already-authorised device.
+    this._onConnect = (e) => { if (this._matches(e.device) && !this.connected) this._attach(e.device).catch(() => {}); };
+    this._onDisconnect = (e) => { if (e.device === this.device) this._teardown(true); };
+    if (WHB04BWebHID.isSupported()) {
+      navigator.hid.addEventListener('connect', this._onConnect);
+      navigator.hid.addEventListener('disconnect', this._onDisconnect);
+    }
   }
 
   static isSupported() {
     return typeof navigator !== 'undefined' && 'hid' in navigator;
   }
 
+  _matches(d) {
+    return d && d.vendorId === WHB04B_VENDOR_ID && d.productId === WHB04B_PRODUCT_ID;
+  }
+
   async tryReconnect() {
     if (!WHB04BWebHID.isSupported()) return false;
     const devices = await navigator.hid.getDevices();
-    const match = devices.find(
-      (d) => d.vendorId === WHB04B_VENDOR_ID && d.productId === WHB04B_PRODUCT_ID,
-    );
+    const match = devices.find((d) => this._matches(d));
     if (!match) return false;
     await this._attach(match);
     return true;
@@ -115,6 +128,19 @@ export class WHB04BWebHID extends EventTarget {
     this.dispatchEvent(new CustomEvent('attach', { detail: { device } }));
   }
 
+  // Tear down the current device. Emits 'remove' when emit=true (physical
+  // disconnect or destroy); keeps the navigator.hid listeners so a later
+  // re-plug of an authorised device auto-attaches.
+  _teardown(emit) {
+    if (this.device) {
+      try { this.device.removeEventListener('inputreport', this._onInput); } catch { /* ignore */ }
+      this.device = null;
+    }
+    this.connected = false;
+    this._previous = null;
+    if (emit) this.dispatchEvent(new CustomEvent('remove'));
+  }
+
   _handleInput(e) {
     if (e.reportId !== INPUT_REPORT_ID) return;
     const body = new Uint8Array(e.data.buffer, e.data.byteOffset, e.data.byteLength);
@@ -127,7 +153,16 @@ export class WHB04BWebHID extends EventTarget {
     this.dispatchEvent(new CustomEvent('use', { detail: parseInput(bytes) }));
   }
 
-  async sendDisplayData(frame) {
+  // Queues the frame behind any in-flight write so chunks never interleave.
+  sendDisplayData(frame) {
+    const run = () => this._writeFrame(frame);
+    const p = this._writeChain.then(run, run);
+    // Keep the chain alive even if this write rejects; return the real result.
+    this._writeChain = p.catch(() => {});
+    return p;
+  }
+
+  async _writeFrame(frame) {
     if (!this.device || !this.connected) throw new Error('Device not connected.');
     for (let i = 0; i < OUTPUT_PAYLOAD_SIZE; i += OUTPUT_CHUNK) {
       const chunk = new Uint8Array(OUTPUT_CHUNK);
@@ -147,12 +182,12 @@ export class WHB04BWebHID extends EventTarget {
   }
 
   async destroy() {
-    if (this.device) {
-      this.device.removeEventListener('inputreport', this._onInput);
-      try { await this.device.close(); } catch { /* ignore */ }
-      this.device = null;
+    const dev = this.device;
+    this._teardown(true);
+    if (dev) { try { await dev.close(); } catch { /* ignore */ } }
+    if (WHB04BWebHID.isSupported()) {
+      navigator.hid.removeEventListener('connect', this._onConnect);
+      navigator.hid.removeEventListener('disconnect', this._onDisconnect);
     }
-    this.connected = false;
-    this.dispatchEvent(new CustomEvent('remove'));
   }
 }
