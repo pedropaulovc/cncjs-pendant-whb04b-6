@@ -70,3 +70,38 @@ the bytes put on the wire for the display are byte-for-byte identical.
   finishing a 100% in-browser pendant means swapping those for `console`, a
   browser JWT, the socket.io browser bundle, and dropping the file-based config
   loader. None of that is blocked by WebHID — it is ordinary bundling work.
+
+## Running as a CNCjs custom widget (same origin)
+
+`web/widget/` packages the WebHID pendant as a CNCjs custom widget. It runs
+inside a same-origin iframe, so it needs no `allow="hid"` (the `hid` permission
+policy defaults to `self`) and it never reads `~/.cncrc` — it reuses the CNCjs
+session by pulling credentials from the parent frame.
+
+Credentials and the active serial port are obtained, in order:
+
+1. the `?token=` query param the parent sets on the iframe `src`;
+2. the `{ token, action:{ type:'change', payload:{ port, controller } } }`
+   message the parent `postMessage`s into the iframe (this also supplies the
+   active port the commands target);
+3. a same-origin read of the parent's persisted store at
+   `localStorage['cnc'].state.session.token` as a fallback.
+
+`socket.io` is loaded from the same-origin `/socket.io/socket.io.js`, so the
+client always matches the CNCjs 2.x server. The widget does not open or close
+the serial port — the CNCjs app already owns it; the widget only emits
+`socket.emit('command', port, …)` against the open port and pushes
+`controller:state` coordinates back to the pendant LCD.
+
+### Mount it
+
+```bash
+# serve the widget folder from the CNCjs server (same origin)
+cncjs --mount /whb04b:/path/to/cncjs-pendant-whb04b-6/web/widget
+```
+
+Then in the CNCjs UI: **Manage Widgets → add a custom widget**, set the URL to
+`/whb04b/index.html`, open the widget, and click **Connect pendant** (a one-time
+WebHID grant). Because the mount is same origin, `navigator.hid` works without
+any CNCjs patch. Hosting the widget on a different origin would require adding
+`allow="hid"` to the iframe in CNCjs's `Custom.jsx` (a one-line upstream change).

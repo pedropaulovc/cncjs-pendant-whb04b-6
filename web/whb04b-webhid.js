@@ -65,6 +65,9 @@ export function parseInput(bytes) {
     secondKey: KeyPressed[bytes[3]] ?? 'Unknown',
     rightDial: RightDial[bytes[4]] ?? 'Unknown',
     leftDial: LeftDial[bytes[5]] ?? 'Unknown',
+    // raw byte codes, for callers that need to map to actions/distances
+    firstKeyCode: bytes[2], secondKeyCode: bytes[3],
+    rightDialCode: bytes[4], leftDialCode: bytes[5],
     jog: jogRaw > 127 ? jogRaw - 256 : jogRaw,
     raw: bytes,
   };
