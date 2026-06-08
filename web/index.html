@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>WHB04B-6 WebHID Tester</title>
+<style>
+  :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+  body { margin: 0; padding: 1.5rem; max-width: 880px; }
+  h1 { font-size: 1.25rem; }
+  button { font: inherit; padding: .5rem .9rem; border-radius: 8px; border: 1px solid #8884; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; margin: .6rem 0; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .6rem; margin-top: .6rem; }
+  .card { border: 1px solid #8884; border-radius: 10px; padding: .7rem .9rem; }
+  .card .label { font-size: .72rem; opacity: .65; text-transform: uppercase; letter-spacing: .04em; }
+  .card .value { font-size: 1.35rem; font-weight: 600; margin-top: .15rem; }
+  #status { font-weight: 600; }
+  .ok { color: #1a9e4b; } .bad { color: #c0392b; }
+  #log { font-family: ui-monospace, monospace; font-size: .8rem; white-space: pre; background: #8881; border-radius: 8px; padding: .7rem; height: 220px; overflow: auto; }
+  label.field { display: inline-flex; flex-direction: column; font-size: .75rem; gap: .15rem; }
+  input { font: inherit; padding: .3rem; width: 6rem; }
+  .warn { background: #f1c40f22; border: 1px solid #f1c40f88; padding: .6rem .8rem; border-radius: 8px; font-size: .85rem; }
+</style>
+</head>
+<body>
+  <h1>WHB04B-6 CNC Pendant &mdash; WebHID Tester</h1>
+  <p>Connects to the pendant directly from the browser via the WebHID API
+  (VID <code>0x10CE</code> / PID <code>0xEB93</code>). No drivers, no node-hid.</p>
+
+  <div id="unsupported" class="warn" hidden>
+    This browser does not expose <code>navigator.hid</code>. Use Chrome, Edge or
+    Opera over <code>https://</code> or <code>localhost</code>.
+  </div>
+
+  <div class="row">
+    <button id="connect">Connect pendant</button>
+    <button id="disconnect" disabled>Disconnect</button>
+    <span>Status: <span id="status" class="bad">disconnected</span></span>
+  </div>
+
+  <h2 style="font-size:1rem">Live input</h2>
+  <div class="grid">
+    <div class="card"><div class="label">Key 1</div><div class="value" id="k1">&mdash;</div></div>
+    <div class="card"><div class="label">Key 2</div><div class="value" id="k2">&mdash;</div></div>
+    <div class="card"><div class="label">Axis dial (left)</div><div class="value" id="ld">&mdash;</div></div>
+    <div class="card"><div class="label">Rate dial (right)</div><div class="value" id="rd">&mdash;</div></div>
+    <div class="card"><div class="label">Jog delta</div><div class="value" id="jog">0</div></div>
+  </div>
+
+  <h2 style="font-size:1rem">Push to LCD</h2>
+  <div class="row">
+    <label class="field">X<input id="x" type="number" step="0.001" value="12.345" /></label>
+    <label class="field">Y<input id="y" type="number" step="0.001" value="-6.5" /></label>
+    <label class="field">Z<input id="z" type="number" step="0.001" value="3.0" /></label>
+    <label class="field">Feed<input id="feed" type="number" value="1500" /></label>
+    <label class="field">Spindle<input id="spindle" type="number" value="0" /></label>
+    <button id="send" disabled>Send display</button>
+    <button id="clear" disabled>Clear display</button>
+  </div>
+
+  <h2 style="font-size:1rem">Log</h2>
+  <div id="log"></div>
+
+<script type="module">
+import { WHB04BWebHID, buildDisplayFrame, JogMode } from './whb04b-webhid.js';
+
+const $ = (id) => document.getElementById(id);
+const logEl = $('log');
+function log(msg) {
+  const t = new Date().toLocaleTimeString();
+  logEl.textContent += `[${t}] ${msg}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+if (!WHB04BWebHID.isSupported()) {
+  $('unsupported').hidden = false;
+  $('connect').disabled = true;
+}
+
+const pendant = new WHB04BWebHID();
+
+function setConnected(on) {
+  $('status').textContent = on ? 'connected' : 'disconnected';
+  $('status').className = on ? 'ok' : 'bad';
+  $('connect').disabled = on;
+  $('disconnect').disabled = !on;
+  $('send').disabled = !on;
+  $('clear').disabled = !on;
+}
+
+pendant.addEventListener('attach', (e) => {
+  setConnected(true);
+  log(`Attached: ${e.detail.device.productName || 'WHB04B-6'}`);
+});
+pendant.addEventListener('remove', () => { setConnected(false); log('Removed.'); });
+pendant.addEventListener('use', (e) => {
+  const d = e.detail;
+  $('k1').textContent = d.firstKey;
+  $('k2').textContent = d.secondKey;
+  $('ld').textContent = d.leftDial;
+  $('rd').textContent = d.rightDial;
+  $('jog').textContent = String(d.jog);
+  log(`input  K1=${d.firstKey} K2=${d.secondKey} L=${d.leftDial} R=${d.rightDial} jog=${d.jog}`);
+});
+
+$('connect').onclick = async () => {
+  try {
+    const ok = await pendant.requestDevice();
+    if (!ok) log('No device selected.');
+  } catch (err) { log('Error: ' + err.message); }
+};
+$('disconnect').onclick = () => pendant.destroy();
+
+$('send').onclick = async () => {
+  const frame = buildDisplayFrame({
+    jogMode: JogMode.Step,
+    x: parseFloat($('x').value) || 0,
+    y: parseFloat($('y').value) || 0,
+    z: parseFloat($('z').value) || 0,
+    feedRate: parseInt($('feed').value) || 0,
+    spindleRate: parseInt($('spindle').value) || 0,
+  });
+  try { await pendant.sendDisplayData(frame); log('Display sent.'); }
+  catch (err) { log('Send error: ' + err.message); }
+};
+$('clear').onclick = async () => {
+  try { await pendant.clearDisplay(); log('Display cleared.'); }
+  catch (err) { log('Clear error: ' + err.message); }
+};
+
+// Re-attach to a previously authorised pendant without a prompt.
+window.addEventListener('load', async () => {
+  try { if (await pendant.tryReconnect()) log('Reconnected to previously authorised device.'); }
+  catch (err) { log('Reconnect skipped: ' + err.message); }
+});
+</script>
+</body>
+</html>
