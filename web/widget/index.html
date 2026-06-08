@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>WHB04B-6 Pendant (CNCjs widget)</title>
+<!-- Same-origin socket.io client served by CNCjs; guarantees a version match. -->
+<script src="/socket.io/socket.io.js"></script>
+<style>
+  :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+  body { margin: 0; padding: 12px; }
+  h1 { font-size: 1rem; margin: 0 0 8px; }
+  .pills { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .pill { font-size: .72rem; padding: 2px 8px; border-radius: 999px; border: 1px solid #8884; }
+  .pill.ok { background: #1a9e4b22; color: #1a9e4b; border-color: #1a9e4b66; }
+  .pill.bad { background: #c0392b22; color: #c0392b; border-color: #c0392b66; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+  button { font: inherit; padding: 5px 10px; border-radius: 7px; border: 1px solid #8884; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 6px; }
+  .card { border: 1px solid #8884; border-radius: 8px; padding: 6px 8px; }
+  .card .label { font-size: .65rem; opacity: .65; text-transform: uppercase; }
+  .card .value { font-size: 1.1rem; font-weight: 600; }
+  label.field { display: inline-flex; flex-direction: column; font-size: .7rem; gap: 2px; }
+  input { font: inherit; padding: 3px; width: 5rem; }
+  #log { font-family: ui-monospace, monospace; font-size: .72rem; white-space: pre; background: #8881; border-radius: 7px; padding: 6px; height: 130px; overflow: auto; }
+</style>
+</head>
+<body>
+  <h1>WHB04B-6 Pendant — WebHID</h1>
+
+  <div class="pills">
+    <span id="hidPill" class="pill bad">pendant ✗</span>
+    <span id="sockPill" class="pill bad">socket ✗</span>
+    <span id="tokenPill" class="pill bad">no token</span>
+    <span id="portPill" class="pill bad">no port</span>
+  </div>
+
+  <div class="row">
+    <button id="connect">Connect pendant</button>
+    <button id="reconnectSock">Re-read creds &amp; connect</button>
+    <label class="field">Probe plate mm<input id="thickness" type="number" step="0.01" value="20" /></label>
+  </div>
+
+  <div class="grid">
+    <div class="card"><div class="label">Key 1</div><div class="value" id="k1">—</div></div>
+    <div class="card"><div class="label">Key 2</div><div class="value" id="k2">—</div></div>
+    <div class="card"><div class="label">Axis</div><div class="value" id="ld">—</div></div>
+    <div class="card"><div class="label">Rate</div><div class="value" id="rd">—</div></div>
+    <div class="card"><div class="label">Jog</div><div class="value" id="jog">0</div></div>
+  </div>
+
+  <h2 style="font-size:.8rem;margin:10px 0 4px">Log</h2>
+  <div id="log"></div>
+
+  <script type="module" src="./whb04b-widget.js"></script>
+</body>
+</html>
