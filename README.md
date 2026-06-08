@@ -96,6 +96,12 @@ size and feed rate, and the wheel jogs.
   headless/PM2 deployment. As a widget the pendant simply lives in the CNCjs
   tab the operator already has open.
 
+## Reference implementation
+
+The WHB04B-6 USB HID protocol used here — input report layout, key and dial
+codes, and the 21-byte LCD frame — is documented in the companion C# reference
+implementation: <https://github.com/pedropaulovc/whb04b-6>.
+
 ## Acknowledgments
 
 This project descends from
