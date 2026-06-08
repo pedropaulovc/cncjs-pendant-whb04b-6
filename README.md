@@ -5,10 +5,6 @@ It runs entirely in the browser — there is no Node process to install and no
 native HID module to compile. The pendant talks to the device through
 `navigator.hid` and drives the machine through CNCjs's existing socket session.
 
-> Earlier 2.x releases shipped a Node CLI built on `node-hid`. That has been
-> replaced by this browser implementation. See [WEBHID.md](WEBHID.md) for the
-> migration details and the node-hid → WebHID mapping.
-
 ## Requirements
 
 - A Chromium-based browser (Chrome, Edge, or Opera) — WebHID is not available in
@@ -89,6 +85,16 @@ size and feed rate, and the wheel jogs.
 - **Commands** — it loads same-origin `socket.io` and emits
   `command/<port>` against the already-open serial port; it does not open or
   close the port itself.
+
+## Notes
+
+- **Same origin.** Mounted on the CNCjs server the widget is same origin, so
+  WebHID works without any CNCjs change (the `hid` permission policy defaults to
+  `self`). Serving it from a different origin would need `allow="hid"` on the
+  widget iframe in CNCjs's `Custom.jsx` — a one-line upstream patch.
+- **No headless mode.** WebHID needs an open browser tab, so there is no
+  headless/PM2 deployment. As a widget the pendant simply lives in the CNCjs
+  tab the operator already has open.
 
 ## Acknowledgments
 
