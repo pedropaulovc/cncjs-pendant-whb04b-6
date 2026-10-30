@@ -1,3 +1,5 @@
+import { validateMacroContent } from './macro-validation.js';
+
 export const MACRO_BUTTONS = [
   { slot: '1', button: 'Feed+' }, { slot: '2', button: 'Feed-' },
   { slot: '5', button: 'M-Home' }, { slot: '6', button: 'Safe-Z' },
@@ -112,6 +114,8 @@ export class MacroSettings {
     row.preview.textContent = macro.content || '(Empty macro)';
     row.preview.hidden = false;
     row.note.textContent = 'Linked to CNCjs. Edit its commands in the CNCjs Macro widget.';
+    try { validateMacroContent(macro.content); }
+    catch (error) { row.note.dataset.state = 'missing'; row.note.textContent = error.message; }
   }
 
   setAssignments(assignments) {
