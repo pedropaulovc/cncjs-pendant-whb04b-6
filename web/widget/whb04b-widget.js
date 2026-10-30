@@ -91,7 +91,6 @@ function setPill(id, on, text) {
 //---------------------------------------------------------------------------
 let jogMode = JogMode.Step;
 const pendant = new WHB04BWebHID();
-const grbl = new Grbl({ command: (...args) => session.command(...args) }, () => zProbeThickness);
 const session = new CncjsSession({
   io: (...args) => io(...args),
   origin: location.origin,
@@ -103,6 +102,7 @@ const session = new CncjsSession({
   },
   onState: onControllerState,
 });
+const grbl = new Grbl(session, () => zProbeThickness);
 
 function refreshCtxUI() {
   setPill('tokenPill', !!ctx.token, ctx.token ? 'token ✓' : 'no token');
