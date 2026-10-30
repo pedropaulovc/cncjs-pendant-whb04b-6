@@ -8,6 +8,7 @@ export class CncjsSession {
     this.stopPhase = 'idle';
     this.stopIntent = 'motion';
     this.stopPort = null;
+    this.holdRequest = 'not-requested';
     this.workflowState = 'unknown';
     this.selection = 'automatic';
     this.selectedPort = null;
@@ -23,11 +24,8 @@ export class CncjsSession {
   }
 
   clear() {
-    const interrupted = this.stopPhase !== 'idle';
-    const intent = this.stopIntent;
-    const stopPort = this.stopPort;
-    this.finishStop();
-    if (interrupted) { this.stopPhase = 'interrupted'; this.stopIntent = intent; this.stopPort = stopPort; }
+    this.cancelStopPolling();
+    if (this.stopPhase !== 'idle') this.stopPhase = 'interrupted';
     this.workflowState = 'unknown';
     this.generation += 1;
     this.pendingPort = null;
@@ -115,15 +113,19 @@ export class CncjsSession {
       this.refresh();
       return;
     }
+    this.workflowState = 'unknown';
+    this.status.controller = null;
     this.pendingPort = target.port;
     this.update('joining');
-    const generation = this.generation;
+    const generation = ++this.generation;
     // CNCjs's open RPC also joins an existing controller and sends its current
     // state. It has no separate join-only RPC, so only in-use ports qualify.
     this.socket.emit('open', target.port, { controllerType: 'Grbl', baudrate: 115200 }, (error) => {
       if (generation !== this.generation || !this.socket?.connected) return;
       this.pendingPort = null;
       if (error) {
+        this.workflowState = 'unknown';
+        this.status.controller = null;
         this.update('discovering', `Cannot join port: ${String(error.message || error)}`);
         return;
       }
@@ -142,8 +144,13 @@ export class CncjsSession {
       this.update('joined', 'Command dropped: Stop is waiting for the controller.');
       return;
     }
-    if (this.stopPhase === 'interrupted' && directive === 'reset') this.stop();
-    if (this.stopPhase !== 'idle' && directive === 'reset') this.stopPhase = 'resetting';
+    if (this.stopPhase !== 'idle' && directive === 'reset') {
+      if (this.stopPort !== this.status.port) this.stopIntent = 'motion';
+      this.stopPort = this.status.port;
+      this.stopPhase = 'resetting';
+      this.update('joined', 'Stopping: waiting for controller reset.');
+      this.startStopPolling();
+    }
     this.socket.emit('command', this.status.port, directive, data);
   }
 
@@ -158,19 +165,36 @@ export class CncjsSession {
     const retryProgram = this.stopPhase === 'interrupted' && this.stopIntent === 'program' && this.stopPort === this.status.port;
     this.stopIntent = retryProgram || ['running', 'paused'].includes(this.workflowState) ? 'program' : 'motion';
     this.stopPort = this.status.port;
+    this.holdRequest = 'not-requested';
     this.stopPhase = 'querying';
     this.update('joined', 'Stopping: waiting for controller status.');
     this.socket.emit('command', this.status.port, 'gcode:stop');
     this.socket.emit('command', this.status.port, 'feeder:stop');
     this.socket.emit('command', this.status.port, 'jogCancel');
-    if (this.stopIntent === 'program') this.socket.emit('command', this.status.port, 'feedhold');
+    if (this.stopIntent === 'program') this.requestHold();
     this.command('statusreport');
     // CNCjs's forced stop uses a cached state and a fixed 500 ms reset delay.
     // Explicit reports retain GRBL's Hold substate; never reset during Hold:1.
+    this.startStopPolling();
+  }
+
+  startStopPolling() {
+    if (this.stopTimer !== null) return;
     const generation = this.generation;
     this.stopTimer = this.schedule(() => {
       if (generation === this.generation && this.stopPhase !== 'idle') this.command('statusreport');
     }, 250);
+  }
+
+  cancelStopPolling() {
+    if (this.stopTimer !== null) this.cancel(this.stopTimer);
+    this.stopTimer = null;
+  }
+
+  requestHold() {
+    if (this.holdRequest === 'requested') return;
+    this.holdRequest = 'requested';
+    this.socket.emit('command', this.status.port, 'feedhold');
   }
 
   stopReport(line) {
@@ -189,7 +213,6 @@ export class CncjsSession {
     if (state === 'Idle' && this.stopIntent === 'program') {
       this.stopPhase = 'holding';
       this.update('joined', 'Stopping: waiting for program hold before reset.');
-      this.socket.emit('command', this.status.port, 'feedhold');
       return;
     }
     // A previous explicit status query can already be in flight at Stop.
@@ -214,6 +237,11 @@ export class CncjsSession {
       return;
     }
     if (state === 'Hold:0') {
+      if (this.stopPhase !== 'hold-confirmation') {
+        this.stopPhase = 'hold-confirmation';
+        this.update('joined', 'Stopping: confirming completed hold.');
+        return;
+      }
       this.update('joined', 'Stopping: hold complete; resetting controller.');
       this.command('reset');
       return;
@@ -230,15 +258,16 @@ export class CncjsSession {
     }
     this.stopPhase = 'holding';
     this.update('joined', `Stopping: canceling ${state === 'Jog' ? 'jog' : 'programmed motion'}.`);
-    this.socket.emit('command', this.status.port, state === 'Jog' ? 'jogCancel' : 'feedhold');
+    if (state === 'Jog') this.socket.emit('command', this.status.port, 'jogCancel');
+    if (state === 'Run') this.requestHold();
   }
 
   finishStop() {
-    if (this.stopTimer !== null) this.cancel(this.stopTimer);
-    this.stopTimer = null;
+    this.cancelStopPolling();
     this.stopPhase = 'idle';
     this.stopIntent = 'motion';
     this.stopPort = null;
+    this.holdRequest = 'not-requested';
   }
 
   disconnect() {

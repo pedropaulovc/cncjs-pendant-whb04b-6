@@ -102,8 +102,11 @@ for (const workflow of ['running', 'paused']) test(`Stop holds and resets a ${wo
   report(f, 'Idle'); report(f, 'Idle');
   assert.equal(f.session.stopIntent, 'program');
   assert.notEqual(f.session.stopPhase, 'idle');
+  assert.equal(stopCommands(f).filter(([name]) => name === 'feedhold').length, 1);
   report(f, 'Hold:1');
   for (let tick = 0; tick < 20; tick++) for (const timer of f.timers) timer();
+  assert.equal(stopCommands(f).some(([name]) => name === 'reset'), false);
+  report(f, 'Hold:0');
   assert.equal(stopCommands(f).some(([name]) => name === 'reset'), false);
   report(f, 'Hold:0');
   assert.equal(stopCommands(f).filter(([name]) => name === 'reset').length, 1);
@@ -122,6 +125,7 @@ test('interrupted program cancellation retains its intent after workflow becomes
   f.session.stop(); report(f, 'Idle'); report(f, 'Idle');
   assert.equal(f.session.stopIntent, 'program');
   assert.notEqual(f.session.stopPhase, 'idle');
+  report(f, 'Hold:0');
   report(f, 'Hold:0');
   assert.equal(stopCommands(f).at(-1)[0], 'reset');
 });
@@ -210,7 +214,7 @@ test('interrupted Stop stays interlocked after reconnect until explicitly retrie
   report(f, 'Idle'); report(f, 'Idle');
   f.session.command('cyclestart');
   assert.equal(stopCommands(f).length, count);
-  f.session.stop(); report(f, 'Hold:0');
+  f.session.stop(); report(f, 'Hold:0'); report(f, 'Hold:0');
   assert.equal(stopCommands(f).at(-1)[0], 'reset');
   f.socket.receive('serialport:read', "Grbl 1.1h ['$' for help]");
   report(f, 'Idle'); report(f, 'Idle');
@@ -341,4 +345,56 @@ for (const event of ['error', 'connect_error', 'serialport:close']) test(`Stop c
   assert.equal(f.session.stopPhase, 'interrupted');
   assert.equal(f.session.stopTimer, null);
   assert.equal(f.timers.size, 1);
+});
+
+test('one stale completed-hold report cannot reset a running or decelerating machine', () => {
+  const f = fixture(); f.join(); f.session.stop();
+  report(f, 'Hold:0'); report(f, 'Run'); report(f, 'Run');
+  assert.equal(stopCommands(f).filter(([name]) => name === 'feedhold').length, 1);
+  report(f, 'Hold:0'); report(f, 'Hold:1'); report(f, 'Hold:0');
+  assert.equal(stopCommands(f).some(([name]) => name === 'reset'), false);
+  report(f, 'Hold:0'); report(f, 'Hold:0');
+  assert.equal(stopCommands(f).filter(([name]) => name === 'reset').length, 1);
+});
+
+test('explicit Reset after interruption sends no Stop or hold preamble', () => {
+  const f = fixture(); f.join();
+  f.socket.receive('workflow:state', 'running'); f.session.stop();
+  f.socket.disconnect(); f.socket.connect(); f.join();
+  f.socket.receive('workflow:state', 'idle');
+  const count = stopCommands(f).length;
+  f.session.command('reset');
+  assert.deepEqual(stopCommands(f).slice(count).map(([name]) => name), ['reset']);
+  assert.equal(f.timers.size, 2);
+  report(f, 'Idle'); report(f, 'Hold:0'); report(f, 'Hold:0');
+  assert.equal(f.session.stopPhase, 'resetting');
+  f.socket.receive('serialport:read', "Grbl 1.1h ['$' for help]");
+  report(f, 'Idle'); report(f, 'Idle');
+  assert.equal(f.session.stopPhase, 'idle');
+  assert.equal(f.timers.size, 1);
+});
+
+test('failed joins clear workflow state before trying another port', () => {
+  const f = fixture();
+  f.list([{ port: 'COM1', inuse: true }]);
+  f.socket.receive('workflow:state', 'running');
+  f.emitted.findLast(([event]) => event === 'open')[3]('join failed');
+  assert.equal(f.session.workflowState, 'unknown');
+  f.join('COM2'); f.session.stop(); report(f, 'Idle'); report(f, 'Idle');
+  assert.equal(stopCommands(f).some(([name]) => name === 'feedhold' || name === 'reset'), false);
+});
+
+test('changing a pending join clears workflow state and ignores its old callback', () => {
+  const f = fixture();
+  f.list([{ port: 'COM1', inuse: true }]);
+  const oldJoin = f.emitted.findLast(([event]) => event === 'open')[3];
+  f.socket.receive('workflow:state', 'running');
+  f.list([{ port: 'COM2', inuse: true }]);
+  assert.equal(f.session.workflowState, 'unknown');
+  oldJoin(null);
+  assert.equal(f.session.status.port, null);
+  f.socket.receive('serialport:open', { port: 'COM2', controllerType: 'Grbl' });
+  f.emitted.findLast(([event]) => event === 'open')[3](null);
+  f.session.stop(); report(f, 'Idle'); report(f, 'Idle');
+  assert.equal(stopCommands(f).some(([name]) => name === 'feedhold' || name === 'reset'), false);
 });
