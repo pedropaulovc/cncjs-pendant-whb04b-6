@@ -6,6 +6,8 @@ export class CncjsSession {
     this.timer = null;
     this.stopTimer = null;
     this.stopPhase = 'idle';
+    this.stopIntent = 'motion';
+    this.workflowState = 'unknown';
     this.selection = 'automatic';
     this.selectedPort = null;
     this.generation = 0;
@@ -21,8 +23,10 @@ export class CncjsSession {
 
   clear() {
     const interrupted = this.stopPhase !== 'idle';
+    const intent = this.stopIntent;
     this.finishStop();
-    if (interrupted) this.stopPhase = 'interrupted';
+    if (interrupted) { this.stopPhase = 'interrupted'; this.stopIntent = intent; }
+    this.workflowState = 'unknown';
     this.generation += 1;
     this.pendingPort = null;
     this.status.port = null;
@@ -84,6 +88,9 @@ export class CncjsSession {
     on('controller:state', (type, state) => {
       if (type === 'Grbl') this.onState(type, state);
     });
+    on('workflow:state', state => {
+      if ((this.pendingPort || this.status.port) && ['idle', 'running', 'paused'].includes(state)) this.workflowState = state;
+    });
     on('serialport:read', line => this.stopReport(line));
     on('serialport:list', (ports) => this.join(ports));
     this.timer = this.schedule(() => this.discover(), 2000);
@@ -144,11 +151,16 @@ export class CncjsSession {
       return;
     }
     if (!['idle', 'interrupted'].includes(this.stopPhase)) return;
+    // A dwell reports Idle while the sender is still running. Preserve this
+    // intent before gcode:stop changes workflow state, including after reconnect.
+    const retryProgram = this.stopPhase === 'interrupted' && this.stopIntent === 'program';
+    this.stopIntent = retryProgram || ['running', 'paused'].includes(this.workflowState) ? 'program' : 'motion';
     this.stopPhase = 'querying';
     this.update('joined', 'Stopping: waiting for controller status.');
     this.socket.emit('command', this.status.port, 'gcode:stop');
     this.socket.emit('command', this.status.port, 'feeder:stop');
     this.socket.emit('command', this.status.port, 'jogCancel');
+    if (this.stopIntent === 'program') this.socket.emit('command', this.status.port, 'feedhold');
     this.command('statusreport');
     // CNCjs's forced stop uses a cached state and a fixed 500 ms reset delay.
     // Explicit reports retain GRBL's Hold substate; never reset during Hold:1.
@@ -163,6 +175,7 @@ export class CncjsSession {
     if (typeof line !== 'string') return;
     if (this.stopPhase === 'resetting') {
       if (!line.startsWith('Grbl ')) return;
+      this.stopIntent = 'motion';
       this.stopPhase = 'confirming';
       this.update('joined', 'Stopping: reset received; confirming controller status.');
       this.command('statusreport');
@@ -170,6 +183,12 @@ export class CncjsSession {
     }
     const state = /^<([^|>]+)/.exec(line)?.[1];
     if (!state) return;
+    if (state === 'Idle' && this.stopIntent === 'program') {
+      this.stopPhase = 'holding';
+      this.update('joined', 'Stopping: waiting for program hold before reset.');
+      this.socket.emit('command', this.status.port, 'feedhold');
+      return;
+    }
     // A previous explicit status query can already be in flight at Stop.
     // Require another Idle report before releasing the motion interlock.
     if (state === 'Idle' && this.stopPhase !== 'idle-confirmation') {
@@ -215,6 +234,7 @@ export class CncjsSession {
     if (this.stopTimer !== null) this.cancel(this.stopTimer);
     this.stopTimer = null;
     this.stopPhase = 'idle';
+    this.stopIntent = 'motion';
   }
 
   disconnect() {

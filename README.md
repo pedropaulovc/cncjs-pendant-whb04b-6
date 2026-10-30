@@ -110,13 +110,14 @@ The left dial selects the axis (X/Y/Z/A/B/C), the right dial selects the step
 size and feed rate, and the wheel jogs.
 
 Stop waits for GRBL 1.1 to report a completed hold (`Hold:0`) before resetting
-programmed motion. It leaves an idle controller idle. Pendant motion commands
+programmed motion. It leaves an idle controller idle when no program is running
+or paused; a program's dwell is canceled with hold and reset too. Pendant motion commands
 stay blocked until the controller confirms the stop; inspect CNCjs if status
 updates stop arriving. Reset remains available.
 If a connection is interrupted during Stop, motion stays blocked after reconnect;
 inspect CNCjs and press Stop or Reset to recover. Follow the controller's
-unlock/homing procedure after a reset. Stop at Idle or during jogging does not
-switch off the spindle. These software controls depend on the
+unlock/homing procedure after a reset. With no active program, Stop at Idle or
+during jogging does not switch off the spindle. These software controls depend on the
 browser and serial connection and do not replace a wired emergency stop.
 Stop aborts homing with a reset, which may require unlocking and homing again.
 For a safety-door, sleep, or check state, inspect CNCjs; Reset remains available.

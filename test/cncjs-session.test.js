@@ -93,6 +93,47 @@ test('Stop at Idle clears queues and confirms Idle without hold or reset', () =>
   assert.equal(f.timers.size, 1);
 });
 
+for (const workflow of ['running', 'paused']) test(`Stop holds and resets a ${workflow} program even when GRBL reports Idle during dwell`, () => {
+  const f = fixture(); f.join();
+  f.socket.receive('workflow:state', workflow);
+  f.session.stop();
+  assert.equal(stopCommands(f).some(([name]) => name === 'feedhold'), true);
+  f.socket.receive('workflow:state', 'idle'); // gcode:stop changes sender state immediately.
+  report(f, 'Idle'); report(f, 'Idle');
+  assert.equal(f.session.stopIntent, 'program');
+  assert.notEqual(f.session.stopPhase, 'idle');
+  report(f, 'Hold:1');
+  for (let tick = 0; tick < 20; tick++) for (const timer of f.timers) timer();
+  assert.equal(stopCommands(f).some(([name]) => name === 'reset'), false);
+  report(f, 'Hold:0');
+  assert.equal(stopCommands(f).filter(([name]) => name === 'reset').length, 1);
+  f.socket.receive('serialport:read', "Grbl 1.1h ['$' for help]");
+  report(f, 'Idle'); report(f, 'Idle');
+  assert.equal(f.session.stopPhase, 'idle');
+  assert.equal(f.session.stopIntent, 'motion');
+});
+
+test('interrupted program cancellation retains its intent after workflow becomes Idle', () => {
+  const f = fixture(); f.join();
+  f.socket.receive('workflow:state', 'running'); f.session.stop();
+  f.socket.receive('workflow:state', 'idle');
+  f.socket.disconnect(); f.socket.connect(); f.join();
+  f.socket.receive('workflow:state', 'idle');
+  f.session.stop(); report(f, 'Idle'); report(f, 'Idle');
+  assert.equal(f.session.stopIntent, 'program');
+  assert.notEqual(f.session.stopPhase, 'idle');
+  report(f, 'Hold:0');
+  assert.equal(stopCommands(f).at(-1)[0], 'reset');
+});
+
+test('workflow state from a previous port cannot make a new idle port reset', () => {
+  const f = fixture(); f.join(); f.socket.receive('workflow:state', 'running');
+  f.session.selectPort('COM2'); f.join('COM2'); f.session.stop();
+  report(f, 'Idle'); report(f, 'Idle');
+  assert.equal(f.session.stopPhase, 'idle');
+  assert.equal(stopCommands(f).some(([name]) => name === 'reset' || name === 'feedhold'), false);
+});
+
 test('Stop uses fresh reports despite cached Idle, waits through Hold:1, then resets once', () => {
   const f = fixture(); f.join();
   f.socket.receive('controller:state', 'Grbl', { status: { activeState: 'Idle' } });
