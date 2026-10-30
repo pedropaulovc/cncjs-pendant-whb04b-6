@@ -148,10 +148,13 @@ only logs its slot number. Bare Reset and Stop retain their normal behavior.
   axis's GRBL maximum rate (`$110`–`$112`). Motion is issued as one outstanding
   segment with 200 ms of travel at that feed; a 180 ms gap between wheel reports cancels
   the jog. Direction, axis, and mode changes also cancel it. New motion waits
-  for two fresh Idle reports after each segment or cancellation. Status is
+  for an Idle report at the commanded endpoint after each segment, or two
+  fresh Idle reports after cancellation. Status is
   queried every 100 ms while the wheel turns. Acceleration and status latency
   can produce pauses between segments; this bounds queued travel if the
-  connection drops. Browser/serial latency and GRBL deceleration add to stopping time.
+  connection drops. Very low rates whose segments fall below position/step
+  resolution are refused with a log message. Browser/serial latency and GRBL
+  deceleration add to stopping time.
 
 In MPG or Continuous, moving the selector also sets the feed override to its
 percentage. GRBL's 10–200% override range clamps the 2% and 5% selections to 10%

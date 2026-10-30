@@ -16,6 +16,7 @@ export class CncjsSession {
     this.idleReports = 0;
     this.overrideSequence = 0;
     this.overrides = [];
+    this.positionReport = null;
     this.activeState = '';
     this.selection = 'automatic';
     this.selectedPort = null;
@@ -38,6 +39,7 @@ export class CncjsSession {
     this.settings = {};
     this.activeState = '';
     this.overrides = [];
+    this.positionReport = null;
     this.idleReports = 0;
     this.generation += 1;
     this.pendingPort = null;
@@ -115,6 +117,16 @@ export class CncjsSession {
         this.activeState = state;
         this.reportSequence += 1;
         this.idleReports = state === 'Idle' ? this.idleReports + 1 : 0;
+      }
+      const position = typeof line === 'string' ? /\|(MPos|WPos):([^|>]+)/.exec(line) : null;
+      if (position) {
+        const words = position[2].split(',').slice(0, 3);
+        const values = words.map(Number);
+        if (words.length === 3 && values.every(Number.isFinite)) {
+          this.positionReport = { kind: position[1], values, sequence: this.reportSequence,
+            units: this.settings.settings?.$13,
+            resolution: Math.max(...words.map(word => 10 ** -(word.split('.')[1]?.length || 0))) };
+        }
       }
       const overrides = typeof line === 'string' ? /\|Ov:(\d+),(\d+),(\d+)/.exec(line) : null;
       if (overrides) { this.overrides = overrides.slice(1).map(Number); this.overrideSequence += 1; }

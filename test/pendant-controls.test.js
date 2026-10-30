@@ -13,6 +13,7 @@ function clock() {
 function fixture() {
   const commands = [], logs = [], timer = clock();
   const session = { status: { phase: 'joined' }, stopPhase: 'idle', workflowState: 'idle', activeState: 'Idle', generation: 1,
+    positionReport: { kind: 'MPos', values: [0,0,0], sequence: 1, units: '0', resolution: 0.001 },
     reportSequence: 1, idleReports: 2, overrideSequence: 1, overrides: [100, 100, 100],
     state: { parserstate: { spindle: '500', modal: { spindle: 'M5', coolant: 'M9' } } },
     settings: { settings: { $110: '3000', $111: '3000', $112: '1000', $30: '1000', $31: '0' } },
@@ -71,7 +72,7 @@ test('first selector report sends no override; real changes set percentages and 
 test('Step counts exact millimetres; large steps opt in; unknown selectors and ABC never move', () => {
   const f = fixture(); f.press(0x0f); f.input({ rightDialCode: 0x0e, jog: 4 });
   assert.deepEqual(f.commands.at(-1), ['gcode', '$J=G21 G91 X0.0400 F250.000']);
-  f.session.reportSequence+=2; f.session.activeState='Idle';
+  f.session.reportSequence+=2; f.session.activeState='Idle'; f.session.positionReport={...f.session.positionReport,values:[0.04,0,0],sequence:f.session.reportSequence};
   f.input({ rightDialCode: 0x1b, jog: 1 });
   assert.equal(f.commands.filter(([c]) => c === 'gcode').length, 1);
   f.controls.setConfig({ largeSteps: 'enabled' }); f.session.reportSequence+=2;
@@ -147,7 +148,7 @@ test('invalid configuration fails without accepting arbitrary macro keys', () =>
 
 test('completed Step releases jog ownership so changing mode does not discard the next wheel input', () => {
   const f=fixture(); f.press(0x0f); f.input({jog:1});
-  f.session.reportSequence+=2; f.session.idleReports=2; f.session.activeState='Idle';
+  f.session.reportSequence++; f.session.idleReports=1; f.session.activeState='Idle'; f.session.positionReport={...f.session.positionReport,values:[0.1,0,0],sequence:f.session.reportSequence};
   f.press(0x0e); f.input({jog:1});
   assert.equal(f.commands.filter(([c])=>c==='gcode').length,2);
   assert.equal(f.commands.some(([c])=>c==='jogCancel'),false);
@@ -158,7 +159,7 @@ test('Continuous never queues behind a slow segment and never starts motion from
   for(let i=0;i<20;i++) { f.timer.advance(50); f.input({jog:5}); }
   assert.equal(f.commands.filter(([c])=>c==='gcode').length,1);
   assert.ok(f.commands.filter(([c])=>c==='statusreport').length>=5);
-  f.session.activeState='Idle'; f.session.idleReports=2; f.session.reportSequence+=2;
+  f.session.activeState='Idle'; f.session.idleReports=2; f.session.reportSequence+=2; f.session.positionReport={...f.session.positionReport,values:[1,0,0],sequence:f.session.reportSequence};
   f.timer.advance(100);
   assert.equal(f.commands.filter(([c])=>c==='gcode').length,1);
   f.input({jog:1});
@@ -172,4 +173,33 @@ test('invalid probe thickness refuses motion while an explicit zero remains vali
   assert.match(f.logs.at(-1),/valid nonnegative probe plate thickness/);
   f.grbl.getProbeThickness=()=>0; f.grbl.probeZ();
   assert.equal(f.commands[0][1][2],'G10 L20 P1 Z0.001');
+});
+
+test('two in-flight Idle reports at the old position cannot admit another Continuous segment', () => {
+  const f=fixture(); f.input({rightDialCode:0x0d}); f.press(0x0e); f.input({jog:1});
+  f.timer.advance(100); f.input({jog:1});
+  f.session.reportSequence+=2; f.session.positionReport.sequence=f.session.reportSequence;
+  f.timer.advance(100); f.input({jog:1});
+  assert.equal(f.commands.filter(([c])=>c==='gcode').length,1);
+  f.session.reportSequence++; f.session.positionReport={...f.session.positionReport,values:[0.2,0,0],sequence:f.session.reportSequence};
+  f.input({jog:1}); assert.equal(f.commands.filter(([c])=>c==='gcode').length,2);
+});
+
+test('Continuous endpoint confirmation converts $13 inch reports to mm and supports WPos', () => {
+  const f=fixture(); f.session.positionReport={kind:'WPos',values:[1,2,3],sequence:1,units:'1',resolution:0.0001};
+  assert.equal(f.grbl.jogPulse('X',2.54,100),'sent');
+  f.session.reportSequence=2; f.session.positionReport={...f.session.positionReport,values:[1.1,2,3],sequence:2};
+  assert.equal(f.grbl.jogCompleted(),true);
+  assert.equal(f.grbl.jogPulse('X',2.54,100),'sent');
+  f.session.reportSequence=3; f.session.positionReport={...f.session.positionReport,values:[1.2,2,3],sequence:3,units:'0'};
+  assert.equal(f.grbl.jogCompleted(),false);
+});
+
+test('endpoint confirmation tolerates GRBL step rounding but rejects a stale starting position', () => {
+  const f=fixture(); f.session.settings.settings.$100='200';
+  f.grbl.jogPulse('X',0.012,4);
+  f.session.reportSequence=3; f.session.positionReport.sequence=3;
+  assert.equal(f.grbl.jogCompleted(),false);
+  f.session.positionReport.values=[0.01,0,0];
+  assert.equal(f.grbl.jogCompleted(),true);
 });

@@ -8,6 +8,7 @@ export class Grbl {
     this.jogGeneration = null;
     this.cancelSequence = 0;
     this.jogSequence = 0;
+    this.jogTarget = null;
     this.spindleDirectionMode = 'M3';
   }
   get state() { return this.session.state || {}; }
@@ -133,11 +134,32 @@ export class Grbl {
     const value = Number(this.settings[`$${110 + index}`]);
     return index >= 0 && Number.isFinite(value) && value > 0 ? value : null;
   }
+  position(axis) {
+    const report = this.session.positionReport;
+    const units = Number(report?.units);
+    if (!report || ![0, 1].includes(units)) return null;
+    const value = report.values[['X', 'Y', 'Z'].indexOf(axis)];
+    if (!Number.isFinite(value)) return null;
+    const scale = units === 1 ? 25.4 : 1;
+    const stepsPerMm = Number(this.settings[`$${100 + ['X', 'Y', 'Z'].indexOf(axis)}`]);
+    const stepRounding = Number.isFinite(stepsPerMm) && stepsPerMm > 0 ? 0.5 / stepsPerMm : 0;
+    return { kind: report.kind, units, value: value * scale, resolution: report.resolution * scale + stepRounding, sequence: report.sequence };
+  }
+  jogCompleted() {
+    if (this.activeState !== 'Idle') return false;
+    if (!this.jogTarget) return this.session.reportSequence >= this.jogSequence + 2 && this.session.idleReports >= 2;
+    const position = this.position(this.jogTarget.axis);
+    if (!position || position.sequence <= this.jogSequence || position.kind !== this.jogTarget.kind || position.units !== this.jogTarget.units) return false;
+    const tolerance = Math.max(position.resolution, this.jogTarget.resolution) + 1e-8;
+    // A stale Idle report at the starting point cannot confirm completion.
+    if (Math.abs(position.value - this.jogTarget.start) < tolerance) return false;
+    return Math.abs(position.value - this.jogTarget.value) <= tolerance;
+  }
   cancelJog() {
     if (this.jogPhase !== 'active') return;
     this.jogPhase = 'idle';
     if (this.jogGeneration !== this.session.generation || this.session.workflowState !== 'idle') return;
-    if (this.activeState === 'Idle' && this.session.reportSequence >= this.jogSequence + 2 && this.session.idleReports >= 2) return;
+    if (this.jogCompleted()) return;
     this._cmd('feeder:stop');
     if (this._cmd('jogCancel') === 'dropped') return;
     this.cancelSequence = this.session.reportSequence;
@@ -146,8 +168,13 @@ export class Grbl {
   }
   jogPulse(axis, distance, feed) {
     if (this.jogPhase === 'active' && this.jogGeneration === this.session.generation) {
-      if (this.activeState !== 'Idle' || this.session.reportSequence < this.jogSequence + 2 || this.session.idleReports < 2) return 'pending';
+      if (!this.jogCompleted()) return 'pending';
       this.jogPhase = 'idle';
+    }
+    const position = this.position(axis);
+    if (!position || Math.abs(distance) <= 2 * position.resolution) {
+      this._cmd('statusreport');
+      return this.refuse('Continuous: waiting for position units/feedback, or selected travel is below report resolution.');
     }
     return this.jog(axis, distance, feed);
   }
@@ -161,11 +188,14 @@ export class Grbl {
     if (!this.manualReady('allow-jog')) return this.refuse('Jog: controller must be idle or jogging with no running program.');
     const max = this.maxRate(axis);
     if (!max) return this.refuse(`Jog: waiting for GRBL ${axis} maximum-rate setting.`);
+    const position = this.position(axis);
+    const previous = this.jogPhase === 'active' && !this.jogCompleted() && this.jogTarget?.axis === axis ? this.jogTarget : position;
     const result = this.gcode(`$J=G21 G91 ${axis}${distance.toFixed(4)} F${Math.min(feed, max).toFixed(3)}`);
     if (result === 'dropped') return result;
     this.jogPhase = 'active';
     this.jogGeneration = this.session.generation;
     this.jogSequence = this.session.reportSequence;
+    this.jogTarget = previous ? { ...previous, axis, start: position?.value ?? previous.start, value: previous.value + Number(distance.toFixed(4)) } : null;
     return 'sent';
   }
 }
