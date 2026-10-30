@@ -152,15 +152,15 @@ export class Grbl {
     if (this.activeState !== 'Idle') return false;
     if (!this.jogTarget) return this.session.reportSequence >= this.jogSequence + 2 && this.session.idleReports >= 2;
     const position = this.position(this.jogTarget.axis, this.jogTarget.kind);
-    if (!position || position.sequence <= this.jogPositionSequence || position.kind !== this.jogTarget.kind || position.units !== this.jogTarget.units) return false;
+    if (!position || position.kind !== this.jogTarget.kind || position.units !== this.jogTarget.units) return false;
     const tolerance = Math.max(position.resolution, this.jogTarget.resolution) + 1e-8;
-    // A stale Idle report at the starting point cannot confirm completion.
-    if (Math.abs(position.value - this.jogTarget.start) < tolerance) {
-      // A tiny Step can round to no visible travel. Continuous rejects such
-      // segments before sending; Step still needs to release its status poller.
-      return Math.abs(this.jogTarget.value - this.jogTarget.start) <= 2 * tolerance
-        && this.session.reportSequence >= this.jogSequence + 2 && this.session.idleReports >= 2;
-    }
+    // An unchanged frame is deduplicated by CNCjs. Tiny Steps and queued Steps
+    // returning to their start still finish after two explicitly requested Idle
+    // reports, even when those reports use the other coordinate frame.
+    if (Math.abs(this.jogTarget.value - this.jogTarget.start) <= 2 * tolerance
+      && Math.abs(position.value - this.jogTarget.value) <= 2 * tolerance
+      && this.session.reportSequence >= this.jogSequence + 2 && this.session.idleReports >= 2) return true;
+    if (position.sequence <= this.jogPositionSequence || Math.abs(position.value - this.jogTarget.start) < tolerance) return false;
     return Math.abs(position.value - this.jogTarget.value) <= tolerance;
   }
   clearJog() {

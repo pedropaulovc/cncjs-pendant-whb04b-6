@@ -561,3 +561,21 @@ test('both frame caches retain their own reporting units and are cleared on rese
   f.session.disconnect();
   assert.deepEqual(f.session.positionReports,{});
 });
+
+for(const travel of ['sub-resolution','out-and-back']) test(`unchanged dual-frame broadcasts release ${travel} Step polling`,()=>{
+  const f=gatedJogFixture(); f.session.settings.settings.$100='200';
+  const broadcast=()=>f.socket.receive('controller:state','Grbl',{status:{activeState:f.machine.state,
+    mpos:{x:f.machine.x.toFixed(3),y:'0.000',z:'0.000'},
+    wpos:{x:(f.machine.x-10).toFixed(3),y:'0.000',z:'0.000'}}});
+  broadcast();
+  assert.equal(f.session.positionReport.kind,'WPos');
+  if(travel==='sub-resolution') f.grbl.jog('X',0.001,250);
+  if(travel==='out-and-back') {
+    f.grbl.jog('X',0.1,250); f.grbl.jog('X',-0.1,250);
+    f.machine.x=0.1; f.machine.state='Jog'; f.tick();
+    f.machine.x=0; f.machine.state='Idle';
+  }
+  // Only raw MPos samples advance: both broadcasts finish at the old positions.
+  for(let i=0;i<4;i++) { f.tick(); broadcast(); }
+  assert.equal(f.grbl.jogPhase,'idle'); assert.equal(f.jobs.size,0);
+});
