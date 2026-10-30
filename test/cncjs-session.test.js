@@ -214,6 +214,7 @@ test('interrupted Stop stays interlocked after reconnect until explicitly retrie
   report(f, 'Idle'); report(f, 'Idle');
   f.session.command('cyclestart');
   assert.equal(stopCommands(f).length, count);
+  assert.match(f.session.status.detail, /press Stop or Reset to recover/);
   f.session.stop(); report(f, 'Hold:0'); report(f, 'Hold:0');
   assert.equal(stopCommands(f).at(-1)[0], 'reset');
   f.socket.receive('serialport:read', "Grbl 1.1h ['$' for help]");

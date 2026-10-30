@@ -141,7 +141,9 @@ export class CncjsSession {
       return;
     }
     if (this.stopPhase !== 'idle' && !['reset', 'statusreport'].includes(directive)) {
-      this.update('joined', 'Command dropped: Stop is waiting for the controller.');
+      this.update('joined', this.stopPhase === 'interrupted'
+        ? 'Command dropped: Stop interrupted; inspect CNCjs, then press Stop or Reset to recover.'
+        : 'Command dropped: Stop is waiting for the controller.');
       return;
     }
     if (this.stopPhase !== 'idle' && directive === 'reset') {
