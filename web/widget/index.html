@@ -42,7 +42,7 @@
     <label class="field">Probe plate mm<input id="thickness" type="number" step="0.01" value="20" /></label>
   </div>
 
-  <div class="grid">
+  <div class="row">Mode: <strong id="mode">mpg</strong></div><div class="grid">
     <div class="card"><div class="label">Key 1</div><div class="value" id="k1">—</div></div>
     <div class="card"><div class="label">Key 2</div><div class="value" id="k2">—</div></div>
     <div class="card"><div class="label">Axis</div><div class="value" id="ld">—</div></div>
@@ -50,6 +50,13 @@
     <div class="card"><div class="label">Jog</div><div class="value" id="jog">0</div></div>
   </div>
 
+  <details>
+    <summary>Pendant settings</summary>
+    <p style="font-size:.75rem">Step feed is mm/min; spindle increment is RPM. Large steps enable 5/10 mm.
+      Macro slots: 1, 2, 5, 6, 7, 9, 11, 12, 13, 14. Enter G-code strings; use \n between lines.</p>
+    <textarea id="config" rows="9" style="width:100%;box-sizing:border-box" aria-label="Pendant settings JSON"></textarea>
+    <button id="saveConfig">Save settings</button>
+  </details>
   <h2 style="font-size:.8rem;margin:10px 0 4px">Log</h2>
   <div id="log"></div>
 

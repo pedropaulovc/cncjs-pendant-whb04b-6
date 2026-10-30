@@ -10,6 +10,10 @@ export class CncjsSession {
     this.stopPort = null;
     this.holdRequest = 'not-requested';
     this.workflowState = 'unknown';
+    this.state = {};
+    this.settings = {};
+    this.reportSequence = 0;
+    this.activeState = '';
     this.selection = 'automatic';
     this.selectedPort = null;
     this.generation = 0;
@@ -27,6 +31,9 @@ export class CncjsSession {
     this.cancelStopPolling();
     if (this.stopPhase !== 'idle') this.stopPhase = 'interrupted';
     this.workflowState = 'unknown';
+    this.state = {};
+    this.settings = {};
+    this.activeState = '';
     this.generation += 1;
     this.pendingPort = null;
     this.status.port = null;
@@ -86,12 +93,21 @@ export class CncjsSession {
       this.status.controller = info.controllerType;
     });
     on('controller:state', (type, state) => {
-      if (type === 'Grbl') this.onState(type, state);
+      if (type !== 'Grbl') return;
+      this.state = state;
+      this.onState(type, state);
+    });
+    on('controller:settings', (type, settings) => {
+      if (type === 'Grbl') this.settings = settings;
     });
     on('workflow:state', state => {
       if ((this.pendingPort || this.status.port) && ['idle', 'running', 'paused'].includes(state)) this.workflowState = state;
     });
-    on('serialport:read', line => this.stopReport(line));
+    on('serialport:read', line => {
+      const state = typeof line === 'string' ? /^<([^|>]+)/.exec(line)?.[1] : null;
+      if (state) { this.activeState = state; this.reportSequence += 1; }
+      this.stopReport(line);
+    });
     on('serialport:list', (ports) => this.join(ports));
     this.timer = this.schedule(() => this.discover(), 2000);
   }
@@ -138,13 +154,13 @@ export class CncjsSession {
   command(directive, data) {
     if (!this.socket?.connected || this.status.phase !== 'joined') {
       this.update(this.status.phase, 'Command dropped: no joined GRBL controller.');
-      return;
+      return 'dropped';
     }
     if (this.stopPhase !== 'idle' && !['reset', 'statusreport'].includes(directive)) {
       this.update('joined', this.stopPhase === 'interrupted'
         ? 'Command dropped: Stop interrupted; inspect CNCjs, then press Stop or Reset to recover.'
         : 'Command dropped: Stop is waiting for the controller.');
-      return;
+      return 'dropped';
     }
     if (this.stopPhase !== 'idle' && directive === 'reset') {
       if (this.stopPort !== this.status.port) this.stopIntent = 'motion';
@@ -154,6 +170,7 @@ export class CncjsSession {
       this.startStopPolling();
     }
     this.socket.emit('command', this.status.port, directive, data);
+    return 'sent';
   }
 
   stop() {
