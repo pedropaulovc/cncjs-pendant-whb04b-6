@@ -11,6 +11,7 @@ export class CncjsSession {
   }
 
   update(phase, detail = '') {
+    if (this.status.phase === phase && this.status.detail === detail) return;
     this.status.phase = phase;
     this.status.detail = detail;
     this.onStatus({ ...this.status });
