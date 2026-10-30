@@ -20,7 +20,9 @@ export class CncjsSession {
   }
 
   clear() {
+    const interrupted = this.stopPhase !== 'idle';
     this.finishStop();
+    if (interrupted) this.stopPhase = 'interrupted';
     this.generation += 1;
     this.pendingPort = null;
     this.status.port = null;
@@ -117,7 +119,8 @@ export class CncjsSession {
         return;
       }
       this.status.port = target.port;
-      this.update(this.status.controller === 'Grbl' ? 'joined' : 'unsupported');
+      this.update(this.status.controller === 'Grbl' ? 'joined' : 'unsupported',
+        this.stopPhase === 'interrupted' ? 'Stop interrupted: inspect CNCjs, then press Stop or Reset to recover.' : '');
     });
   }
 
@@ -130,13 +133,14 @@ export class CncjsSession {
       this.update('joined', 'Command dropped: Stop is waiting for the controller.');
       return;
     }
+    if (this.stopPhase === 'interrupted' && directive === 'reset') this.stop();
     if (this.stopPhase !== 'idle' && directive === 'reset') this.stopPhase = 'resetting';
     this.socket.emit('command', this.status.port, directive, data);
   }
 
   stop() {
     if (!this.socket?.connected || this.status.phase !== 'joined') return;
-    if (this.stopPhase !== 'idle') return;
+    if (!['idle', 'interrupted'].includes(this.stopPhase)) return;
     this.stopPhase = 'querying';
     this.update('joined', 'Stopping: waiting for controller status.');
     this.socket.emit('command', this.status.port, 'gcode:stop');
@@ -152,11 +156,12 @@ export class CncjsSession {
   }
 
   stopReport(line) {
-    if (this.stopPhase === 'idle' || this.status.phase !== 'joined') return;
+    if (['idle', 'interrupted'].includes(this.stopPhase) || this.status.phase !== 'joined') return;
     if (typeof line !== 'string') return;
     if (this.stopPhase === 'resetting') {
       if (!line.startsWith('Grbl ')) return;
       this.stopPhase = 'confirming';
+      this.update('joined', 'Stopping: reset received; confirming controller status.');
       this.command('statusreport');
       return;
     }
@@ -168,27 +173,33 @@ export class CncjsSession {
       this.stopPhase = 'idle-confirmation';
       return;
     }
+    if (state === 'Alarm' && this.stopPhase !== 'alarm-confirmation') {
+      this.stopPhase = 'alarm-confirmation';
+      return;
+    }
     if (state === 'Idle' || state === 'Alarm') {
       this.finishStop();
       this.update('joined', state === 'Alarm' ? 'Stop completed with controller alarm; inspect CNCjs.' : '');
       return;
     }
     if (state === 'Hold:0') {
-      this.stopPhase = 'resetting';
+      this.update('joined', 'Stopping: hold complete; resetting controller.');
       this.command('reset');
       return;
     }
     if (state === 'Hold:1') {
       this.stopPhase = 'holding';
+      this.update('joined', 'Stopping: waiting for deceleration.');
       return;
     }
     if (state !== 'Run' && state !== 'Jog') {
+      this.stopPhase = 'querying';
       this.update('joined', `Stop waiting for controller (${state}); inspect CNCjs.`);
       return;
     }
     this.stopPhase = 'holding';
+    this.update('joined', `Stopping: canceling ${state === 'Jog' ? 'jog' : 'programmed motion'}.`);
     this.socket.emit('command', this.status.port, state === 'Jog' ? 'jogCancel' : 'feedhold');
-    this.command('statusreport');
   }
 
   finishStop() {

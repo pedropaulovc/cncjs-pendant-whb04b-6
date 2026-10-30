@@ -90,7 +90,7 @@ test('Stop uses fresh reports despite cached Idle, waits through Hold:1, then re
   f.session.stop();
   report(f, 'Idle'); // A prior status query may still be in flight.
   report(f, 'Run');
-  assert.equal(stopCommands(f).at(-2)[0], 'feedhold');
+  assert.equal(stopCommands(f).at(-1)[0], 'feedhold');
   report(f, 'Hold:1');
   for (let tick = 0; tick < 20; tick++) for (const timer of f.timers) timer();
   assert.equal(stopCommands(f).some(([name]) => name === 'reset'), false);
@@ -112,7 +112,7 @@ test('Stop cancels jogging without resetting and blocks motion while pending', (
   f.session.command('cyclestart'); f.session.command('gcode', '$J=G91 X1 F50');
   assert.equal(stopCommands(f).length, count);
   report(f, 'Jog');
-  assert.equal(stopCommands(f).at(-2)[0], 'jogCancel');
+  assert.equal(stopCommands(f).at(-1)[0], 'jogCancel');
   report(f, 'Idle'); report(f, 'Idle');
   assert.equal(stopCommands(f).some(([name]) => name === 'reset' || name === 'feedhold'), false);
   f.session.command('cyclestart');
@@ -127,8 +127,22 @@ for (const action of ['disconnect', 'selectPort']) test(`Stop abandons pending a
   report(f, 'Hold:0');
   for (const timer of f.timers) timer();
   assert.equal(stopCommands(f).length, count);
-  assert.equal(f.session.stopPhase, 'idle');
+  assert.equal(f.session.stopPhase, 'interrupted');
   assert.equal(f.session.stopTimer, null);
+});
+
+test('interrupted Stop stays interlocked after reconnect until explicitly retried', () => {
+  const f = fixture(); f.join(); f.session.stop(); report(f, 'Run');
+  f.socket.disconnect(); f.socket.connect(); f.join();
+  const count = stopCommands(f).length;
+  report(f, 'Idle'); report(f, 'Idle');
+  f.session.command('cyclestart');
+  assert.equal(stopCommands(f).length, count);
+  f.session.stop(); report(f, 'Hold:0');
+  assert.equal(stopCommands(f).at(-1)[0], 'reset');
+  f.socket.receive('serialport:read', "Grbl 1.1h ['$' for help]");
+  report(f, 'Idle'); report(f, 'Idle');
+  assert.equal(f.session.stopPhase, 'idle');
 });
 test('joins an active port and delivers initial and subsequent state', () => {
   const f = fixture();
@@ -252,7 +266,7 @@ test('a canceled poll callback cannot send commands to a new port', () => {
 for (const event of ['error', 'connect_error', 'serialport:close']) test(`Stop clears its poll on ${event}`, () => {
   const f = fixture(); f.join(); f.session.stop();
   f.socket.receive(event, new Error('connection lost'));
-  assert.equal(f.session.stopPhase, 'idle');
+  assert.equal(f.session.stopPhase, 'interrupted');
   assert.equal(f.session.stopTimer, null);
   assert.equal(f.timers.size, 1);
 });
