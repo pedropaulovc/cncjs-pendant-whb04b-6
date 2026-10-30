@@ -3,6 +3,7 @@ export class CncjsMacros {
   constructor({ getToken, fetch = (...args) => globalThis.fetch(...args) } = {}) {
     this.getToken = getToken;
     this.fetch = fetch;
+    this.notice = '';
   }
 
   async request(path) {
@@ -34,7 +35,14 @@ export class CncjsMacros {
   async list() {
     const data = await this.request('/api/macros');
     if (!Array.isArray(data?.records)) throw new Error('CNCjs macros: invalid macro list.');
-    return data.records.map(validateRecord);
+    const records = [];
+    for (const value of data.records) {
+      try { records.push(validateRecord(value)); }
+      catch { /* Keep valid choices available when CNCjs contains a malformed record. */ }
+    }
+    const omitted = data.records.length - records.length;
+    this.notice = omitted ? `Skipped ${omitted} invalid CNCjs macro ${omitted === 1 ? 'record' : 'records'}.` : '';
+    return records;
   }
 
   async read(id) {

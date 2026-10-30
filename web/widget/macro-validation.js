@@ -15,13 +15,15 @@ export function validateMacroContent(content) {
       for (const match of line.matchAll(/\[([^\]]+)\]/g)) validateExpression(match[1], index + 1);
       continue;
     }
-    // CNCjs strips semicolon comments before matching %msg/%wait or assignments.
-    const code = line.split(';')[0];
-    if (/^%wait\b/i.test(code)) continue;
-    if (/^%msg\b/i.test(code)) {
-      for (const match of code.matchAll(/\[([^\]]+)\]/g)) validateExpression(match[1], index + 1);
+    // Match CNCjs builtin-command exactly: unlike the assignment path, this
+    // regex does not consume a comment containing lone CR or U+2028 separators.
+    const builtin = line.replace(/;.*$/, '').trim();
+    if (/^%wait\b/i.test(builtin)) continue;
+    if (/^%msg\b/i.test(builtin)) {
+      for (const match of builtin.matchAll(/\[([^\]]+)\]/g)) validateExpression(match[1], index + 1);
       continue;
     }
+    const code = line.split(';')[0];
     if (code.slice(1).trim()) validateExpression(code.slice(1), index + 1);
   }
   return content;
@@ -30,7 +32,9 @@ export function validateMacroContent(content) {
 function validateExpression(expression, line) {
   let ast;
   try { ast = parseScript(expression); }
-  catch { throw new Error(`Macro line ${line}: invalid CNCjs expression.`); }
+  // CNCjs leaves unparseable bracket text unchanged, then strips G-code
+  // comments. A parse failure cannot read a bound; let CNCjs handle that text.
+  catch { return; }
   const name = findBounds(ast);
   if (name) throw new Error(`Macro line ${line} uses ${name}, a program-bound variable unavailable to the pendant. Run this macro from the CNCjs Macro widget.`);
 }

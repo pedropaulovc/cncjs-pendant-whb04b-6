@@ -48,14 +48,32 @@ test('missing credentials, invalid selections, HTTP errors and malformed respons
     const api = new CncjsMacros({ getToken: () => 'token', fetch: async () => ({ ok: false, status }) });
     await assert.rejects(api.list(), new RegExp(`HTTP ${status}`));
   }
-  for (const records of [null, {}, [{ ...macro, content: null }], [{ ...macro, id: '' }]]) {
+  for (const records of [null, {}]) {
     const api = new CncjsMacros({ getToken: () => 'token', fetch: async () => response({ records }) });
     await assert.rejects(api.list(), /invalid macro/);
+  }
+  for (const value of [{ ...macro, content: null }, { ...macro, id: '' }]) {
+    const api = new CncjsMacros({ getToken: () => 'token', fetch: async () => response(value) });
+    await assert.rejects(api.read(macro.id), /invalid macro record/);
   }
   const wrong = new CncjsMacros({ getToken: () => 'token', fetch: async () => response(macro) });
   await assert.rejects(wrong.read('different'), /does not match/);
   const badJson = new CncjsMacros({ getToken: () => 'token', fetch: async () => ({ ok: true, status: 200, json: () => { throw new SyntaxError(); } }) });
   await assert.rejects(badJson.list(), /invalid JSON/);
+});
+
+test('a malformed list record does not hide valid saved macros and the notice resets', async () => {
+  let records = [macro, { id: 'broken' }, null];
+  const api = new CncjsMacros({ getToken: () => 'token', fetch: async () => response({ records }) });
+  assert.equal(api.notice, '');
+  assert.deepEqual(await api.list(), [{ id: macro.id, name: macro.name, content: macro.content }]);
+  assert.equal(api.notice, 'Skipped 2 invalid CNCjs macro records.');
+  records = [{ id: 'broken' }];
+  assert.deepEqual(await api.list(), []);
+  assert.equal(api.notice, 'Skipped 1 invalid CNCjs macro record.');
+  records = [macro];
+  assert.equal((await api.list()).length, 1);
+  assert.equal(api.notice, '');
 });
 
 test('network errors and body timeouts are reported without leaking credentials', async () => {

@@ -36,9 +36,17 @@ test('matches native percent-command expression handling', () => {
   assert.equal(validateMacroContent('%msg literal xmin\n%wait 0.1 ; xmin\n%\nG0 X0'), '%msg literal xmin\n%wait 0.1 ; xmin\n%\nG0 X0');
   assert.throws(() => validateMacroContent('%MSG Width [xmax-xmin]'), /program-bound variable/);
   assert.equal(validateMacroContent('%saved=posx ; xmin'), '%saved=posx ; xmin');
+  for (const separator of ['\r', '\u2028']) {
+    assert.throws(() => validateMacroContent(`%msg Width ;${separator}[xmax]`), /uses xmax/);
+    const assignment = `%saved=posx ;${separator}xmax`;
+    assert.equal(validateMacroContent(assignment), assignment);
+  }
 });
 
-test('reports empty content and expression syntax errors with the line number', () => {
+test('reports empty content but leaves unparseable bracket text for CNCjs', () => {
   for (const content of [undefined, null, '', ' \n ']) assert.throws(() => validateMacroContent(content), /no G-code/);
-  assert.throws(() => validateMacroContent('G21\nG0 X[posx + ]'), /line 2: invalid CNCjs expression/);
+  for (const content of ['G0 X0 ; go to [corner 1]', "G0 Z5 (lift [don't crash])", 'G21\nG0 X[posx + ]']) {
+    assert.equal(validateMacroContent(content), content);
+  }
+  assert.throws(() => validateMacroContent('G21\nG0 X[xmax]'), /line 2 uses xmax/);
 });
