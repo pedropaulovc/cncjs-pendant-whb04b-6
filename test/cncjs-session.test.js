@@ -60,10 +60,10 @@ function fixture() {
   return { session, socket, sockets, timers, emitted, states, list, join };
 }
 
-test('Stop clears queued commands, cancels a jog, and holds programmed motion', () => {
+test('Stop uses CNCjs forced program stop and jog cancel without holding an idle machine', () => {
   const commands = [];
   new Grbl({ command: (...args) => commands.push(args) }).stop();
-  assert.deepEqual(commands.map(([name]) => name), ['gcode:stop', 'feeder:stop', 'jogCancel', 'feedhold']);
+  assert.deepEqual(commands, [['gcode:stop', { force: true }], ['feeder:stop', undefined], ['jogCancel', undefined]]);
 });
 
 test('joins an active port and delivers initial and subsequent state', () => {
