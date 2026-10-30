@@ -71,13 +71,15 @@ maps the pendant's keys, dials, and jog wheel to grbl commands, and mirrors the
 machine coordinates to the pendant LCD.
 
 The LCD shows work coordinates (`X1/Y1/Z1`) by default; Macro-10 switches to
-machine coordinates (`X/Y/Z`). Values use the controller's reported units.
+machine coordinates (`X/Y/Z`). Numeric values follow the controller's active
+G20 (inches) or G21 (millimetres) mode, converting GRBL's `$13` report units as
+needed. Changing G20/G21 updates the displayed numbers without moving an axis.
 Feed and spindle fields show **override percentages**, matching CNCjs's override
 controls even when the machine is stationary. They do not show actual feed or RPM.
 The mode indicator follows MPG, Step, and Continuous. LCD write failures appear
 in the widget log. Losing the CNCjs connection or selecting unsupported A/B/C
 axes shows RESET with cleared values. Missing coordinates or override feedback
-is logged once; no substitute live values are invented. A stalled HID transfer
+or unit information is logged once; no substitute live values are invented. A stalled HID transfer
 disconnects the pendant after one second; reconnect it from the widget.
 
 Open the machine port in CNCjs first. The widget joins the selected open port,

@@ -126,9 +126,9 @@ async function onControllerState(type, state) {
     const unsupportedAxes = [0x14, 0x15, 0x16].includes(controls.axisCode);
     const unavailable = session.status.phase !== 'joined' || unsupportedAxes;
     const frame = unavailable ? buildDisplayFrame({ jogMode: JogMode.Reset })
-      : controllerDisplayFrame(state, { coordinates: controls.coordinates, jogMode });
+      : controllerDisplayFrame(state, { coordinates: controls.coordinates, jogMode, reportUnits: session.settings.settings?.$13 });
     const notice = unsupportedAxes ? 'Pendant LCD: A/B/C positions unavailable on this XYZ GRBL integration; showing RESET.'
-      : !frame ? 'Pendant LCD: waiting for complete coordinates and Ov feed/spindle override feedback.' : '';
+      : !frame ? 'Pendant LCD: waiting for complete coordinates, Ov overrides, $13 report units, and G20/G21 mode.' : '';
     if (notice && notice !== displayNotice) log(notice);
     displayNotice = notice;
     if (!frame) return;
