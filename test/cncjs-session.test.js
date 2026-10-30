@@ -3,6 +3,25 @@ import assert from 'node:assert/strict';
 import { CncjsSession, isParentMessage } from '../web/widget/cncjs-session.js';
 import { Grbl } from '../web/widget/grbl.js';
 
+test('default timers use the browser-compatible receiver', (t) => {
+  const timerId = {};
+  let cancelled;
+  t.mock.method(globalThis, 'setInterval', function () {
+    assert.ok(this === undefined || this === globalThis);
+    return timerId;
+  });
+  t.mock.method(globalThis, 'clearInterval', function (id) {
+    assert.ok(this === undefined || this === globalThis);
+    cancelled = id;
+  });
+  const socket = { on() {}, disconnect() {} };
+  const session = new CncjsSession({ io: () => socket, origin: 'http://localhost' });
+  session.connect('token');
+  assert.equal(session.timer, timerId);
+  session.disconnect();
+  assert.equal(cancelled, timerId);
+});
+
 function fixture() {
   const emitted = [];
   const sockets = [];
