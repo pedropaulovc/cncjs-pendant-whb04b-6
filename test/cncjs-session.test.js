@@ -686,9 +686,10 @@ test('a program invalidates a passive target without changing the Stop generatio
   f.socket.receive('workflow:state','running'); f.socket.receive('workflow:state','idle');
   f.grbl.jog('X',0.001,250); f.tick(); f.tick(); f.tick();
   assert.equal(f.grbl.jogPhase,'armed');
-  const generation=f.session.generation, epoch=f.session.motionEpoch;
+  const generation=f.session.generation, epoch=f.session.workflowEpoch, motionEpoch=f.session.motionEpoch;
   f.socket.receive('workflow:state','running');
-  assert.ok(f.session.motionEpoch>epoch);
+  assert.ok(f.session.workflowEpoch>epoch);
+  assert.equal(f.session.motionEpoch,motionEpoch);
   assert.equal(f.session.generation,generation);
   f.machine.x=10; f.broadcast(); f.socket.receive('workflow:state','idle');
   assert.equal(f.grbl.jog('X',1,250),'sent');
@@ -709,6 +710,34 @@ test('fresh external motion replaces a written passive target before the next St
   f.machine.x=6; f.broadcast(); f.tick();
   assert.equal(f.grbl.jogPhase,'idle');
   assert.equal(f.jobs.size,0);
+});
+
+test('a passive out-and-back target is retained while its owned motion is underway',()=>{
+  const f=gatedJogFixture();
+  f.socket.receive('workflow:state','running'); f.socket.receive('workflow:state','idle');
+  f.grbl.jog('X',0.04,250); f.grbl.jog('X',-0.04,250);
+  f.tick(); f.tick(); f.tick();
+  assert.equal(f.grbl.jogPhase,'armed');
+  f.machine.state='Jog'; f.machine.x=0.02; f.broadcast();
+  assert.equal(f.grbl.jog('X',1,250),'sent');
+  assert.equal(f.grbl.jogTarget.value,1,'Do not add the next Step to the out-leg midpoint');
+  f.machine.state='Idle'; f.machine.x=1; f.broadcast(); f.tick();
+  assert.equal(f.grbl.jogPhase,'idle');
+});
+
+test('program transitions invalidate jog ownership without discarding pending feed overrides',()=>{
+  const f=gatedJogFixture();
+  f.socket.receive('serialport:read','<Idle|MPos:0.000,0.000,0.000|Ov:100,100,100>');
+  assert.equal(f.grbl.override('feed',20),'sent');
+  assert.equal(f.grbl.pendingOverrides.get('feed').target,120);
+  f.socket.receive('workflow:state','running');
+  f.socket.receive('serialport:read','<Run|MPos:0.000,0.000,0.000|Ov:110,100,100>');
+  f.grbl.flushOverrides();
+  assert.equal(f.grbl.pendingOverrides.get('feed').target,120);
+  assert.equal(stopCommands(f).filter(([name])=>name==='feedOverride').length,2);
+  f.socket.receive('serialport:read','<Run|MPos:0.000,0.000,0.000|Ov:120,100,100>');
+  f.grbl.flushOverrides();
+  assert.equal(f.grbl.pendingOverrides.size,0);
 });
 
 test('a fresh coordinate-frame change replaces a written passive target',()=>{

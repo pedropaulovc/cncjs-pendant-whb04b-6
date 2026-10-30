@@ -186,7 +186,8 @@ export class Grbl {
     this.jogCompletionNotice = 'none';
   }
   jogSessionChanged() {
-    return this.jogGeneration !== this.session.generation || this.jogEpoch !== this.session.motionEpoch;
+    return this.jogGeneration !== this.session.generation || this.jogEpoch !== this.session.motionEpoch
+      || this.jogWorkflowEpoch !== this.session.workflowEpoch;
   }
   cancellationCompleted() {
     return this.session.reportSequence >= this.cancelSequence + 2 && this.session.idleReports >= 2 && this.activeState === 'Idle';
@@ -258,7 +259,7 @@ export class Grbl {
     // Rebase the next Step on fresh feedback once all owned lines were written;
     // unsent owned lines still need their accumulated relative target.
     const current = this.position(axis);
-    if (pending && this.jogPhase === 'armed' && this.jogReceipt?.transmission === 'written'
+    if (pending && this.jogPhase === 'armed' && this.activeState === 'Idle' && this.jogReceipt?.transmission === 'written'
       && current && current.sequence > this.jogPositionSequence) {
       const tolerance = Math.max(current.resolution, pending.resolution) + 1e-8;
       if (current.kind !== pending.kind || current.units !== pending.units || Math.abs(current.value - pending.value) > 2 * tolerance) pending = null;
@@ -271,6 +272,7 @@ export class Grbl {
     this.jogPhase = 'active';
     this.jogGeneration = this.session.generation;
     this.jogEpoch = this.session.motionEpoch;
+    this.jogWorkflowEpoch = this.session.workflowEpoch;
     this.jogErrorSequence = this.session.errorSequence ?? 0;
     this.jogSequence = this.session.reportSequence;
     this.jogPositionSequence = this.session.positionReport?.sequence ?? 0;

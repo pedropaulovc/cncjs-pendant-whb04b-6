@@ -22,6 +22,7 @@ export class CncjsSession {
     this.statePositionSignatures = {};
     this.motionState = '';
     this.motionEpoch = 0;
+    this.workflowEpoch = 0;
     this.errorSequence = 0;
     this.controllerError = null;
     this.jogReceipts = new Map();
@@ -144,7 +145,7 @@ export class CncjsSession {
       const previous = this.workflowState;
       this.workflowState = state;
       if (state !== 'idle') {
-        if (state !== previous) this.motionEpoch += 1;
+        if (state !== previous) this.workflowEpoch += 1;
         // CNCjs consumes program acknowledgements internally. If the program is
         // stopped, remaining replies can become visible again without writes.
         this.clearJogReceipts();
