@@ -138,7 +138,9 @@ export class CncjsSession {
       this.onState(type, state);
     });
     on('controller:settings', (type, settings) => {
-      if (type === 'Grbl') this.settings = settings;
+      if (type !== 'Grbl') return;
+      this.settings = settings;
+      this.onState(type, this.state);
     });
     on('workflow:state', state => {
       if (!(this.pendingPort || this.status.port) || !['idle', 'running', 'paused'].includes(state)) return;

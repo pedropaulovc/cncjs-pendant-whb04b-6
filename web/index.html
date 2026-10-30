@@ -113,6 +113,7 @@ $('connect').onclick = async () => {
 $('disconnect').onclick = () => pendant.destroy();
 
 $('send').onclick = async () => {
+  try {
   const frame = buildDisplayFrame({
     jogMode: JogMode.Step,
     x: parseFloat($('x').value) || 0,
@@ -121,7 +122,7 @@ $('send').onclick = async () => {
     feedRate: parseInt($('feed').value) || 0,
     spindleRate: parseInt($('spindle').value) || 0,
   });
-  try { await pendant.sendDisplayData(frame); log('Display sent.'); }
+    await pendant.sendDisplayData(frame); log('Display sent.'); }
   catch (err) { log('Send error: ' + err.message); }
 };
 $('clear').onclick = async () => {

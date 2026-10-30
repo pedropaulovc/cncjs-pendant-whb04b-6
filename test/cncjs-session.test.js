@@ -64,6 +64,17 @@ function stopCommands(f) {
   return f.emitted.filter(([event]) => event === 'command').map(([, , ...args]) => args);
 }
 
+test('GRBL settings arriving after state request a redraw with the new report units', () => {
+  const f = fixture();
+  f.join();
+  const state = { parserstate: { modal: { units: 'G20' } }, status: { wpos: { x: '25.4' } } };
+  f.socket.receive('controller:state', 'Grbl', state);
+  f.states.length = 0;
+  f.socket.receive('controller:settings', 'Grbl', { settings: { $13: '0' } });
+  assert.equal(f.session.settings.settings.$13, '0');
+  assert.deepEqual(f.states, [['Grbl', state]]);
+});
+
 function report(f, state) {
   f.socket.receive('serialport:read', `<${state}|MPos:0,0,0|FS:0,0>`);
 }

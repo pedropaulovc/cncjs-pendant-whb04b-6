@@ -3,8 +3,6 @@
 // Runs directly in a Chromium browser (Chrome/Edge/Opera) over https or
 // localhost -- no build step, no node-hid. ES module.
 //
-// This is the hand-written JS twin of src/whb04b_controller_webhid.ts so the
-// demo page (index.html) can be opened with no toolchain.
 
 export const WHB04B_VENDOR_ID = 0x10ce;
 export const WHB04B_PRODUCT_ID = 0xeb93;
@@ -32,28 +30,31 @@ export const LeftDial = {
   0x14: 'A', 0x15: 'B', 0x16: 'C',
 };
 
-export const JogMode = { None: 0, Continuous: 1, Step: 2, Reset: 3 };
-export const CoordinateSystem = { XYZ: 0, X1Y1Z1: 1 };
+export const JogMode = { None: 2, Continuous: 0, Step: 1, Reset: 0x40 };
+export const CoordinateSystem = { XYZ: 0, X1Y1Z1: 0x80 };
 
-// Build the 21-byte display frame (identical bytes to the node-hid version).
+// LinuxCNC xhc-whb04b-6 usb.h/usb.cc: 21 payload bytes, excluding report ID 0x06.
 export function buildDisplayFrame({
   jogMode = JogMode.None, coordinateSystem = CoordinateSystem.XYZ,
   x = 0, y = 0, z = 0, feedRate = 0, spindleRate = 0,
 } = {}) {
   const data = new Uint8Array(OUTPUT_PAYLOAD_SIZE);
   const dv = new DataView(data.buffer);
-  const fc = (c) => (Math.round(c * 10000) >>> 0);
-  let o = 0;
-  data[o++] = 0x06;
-  data[o++] = jogMode;
-  data[o++] = coordinateSystem;
-  o += 4;
-  dv.setUint32(o, fc(x), true); o += 4;
-  const yc = fc(y);
-  data[o++] = yc & 0xff; data[o++] = (yc >>> 8) & 0xff; data[o++] = (yc >>> 16) & 0xff;
-  dv.setUint32(o, fc(z), true); o += 4;
-  dv.setUint16(o, feedRate & 0xffff, true); o += 2;
-  data[o] = spindleRate & 0xff;
+  if (!Object.values(JogMode).includes(jogMode) || !Object.values(CoordinateSystem).includes(coordinateSystem)) {
+    throw new RangeError('Unsupported pendant display mode.');
+  }
+  data.set([0xfe, 0xfd, 0xfe, jogMode | coordinateSystem]);
+  for (const [index, coordinate] of [x, y, z].entries()) {
+    const scaled = Math.round(Math.abs(coordinate) * 10000);
+    if (!Number.isFinite(coordinate) || scaled > 655359999) throw new RangeError('Pendant coordinates must be finite and within ±65535.9999.');
+    const offset = 4 + index * 4;
+    dv.setUint16(offset, Math.floor(scaled / 10000), true);
+    dv.setUint16(offset + 2, (scaled % 10000) | (coordinate < 0 ? 0x8000 : 0), true);
+  }
+  for (const [index, rate] of [feedRate, spindleRate].entries()) {
+    if (!Number.isInteger(rate) || rate < 0 || rate > 65535) throw new RangeError('Pendant rates must be integers from 0 to 65535.');
+    dv.setUint16(16 + index * 2, rate, true);
+  }
   return data;
 }
 
@@ -80,10 +81,15 @@ export class WHB04BWebHID extends EventTarget {
     this.connected = false;
     this._previous = null;
     this._onInput = (e) => this._handleInput(e);
-    // Serialize LCD writes: sendDisplayData is async and may be called
-    // un-awaited on every input event, so chain writes to stop the three
-    // feature reports of different frames interleaving on the device.
-    this._writeChain = Promise.resolve();
+    // Finish the active frame, then send only the latest pending snapshot.
+    this._pendingDisplay = null;
+    this._displayWriter = null;
+    this._displayEpoch = 0;
+    this._discoveryEpoch = 0;
+    this._deviceClosing = new WeakMap();
+    this._deviceOpening = new WeakMap();
+    this._lifecycle = 'active';
+    this._destroyPromise = null;
     // React to physical plug/unplug of the already-authorised device.
     this._onConnect = (e) => { if (this._matches(e.device) && !this.connected) this._attach(e.device).catch(() => {}); };
     this._onDisconnect = (e) => { if (e.device === this.device) this._teardown(true); };
@@ -102,8 +108,11 @@ export class WHB04BWebHID extends EventTarget {
   }
 
   async tryReconnect() {
+    if (this._lifecycle !== 'active') return false;
     if (!WHB04BWebHID.isSupported()) return false;
+    const epoch = this._discoveryEpoch;
     const devices = await navigator.hid.getDevices();
+    if (epoch !== this._discoveryEpoch || this._lifecycle !== 'active') return false;
     const match = devices.find((d) => this._matches(d));
     if (!match) return false;
     await this._attach(match);
@@ -111,27 +120,70 @@ export class WHB04BWebHID extends EventTarget {
   }
 
   async requestDevice() {
+    if (this._lifecycle !== 'active') return false;
     if (!WHB04BWebHID.isSupported()) throw new Error('WebHID not supported in this browser.');
+    const epoch = this._discoveryEpoch;
     const devices = await navigator.hid.requestDevice({
       filters: [{ vendorId: WHB04B_VENDOR_ID, productId: WHB04B_PRODUCT_ID }],
     });
+    if (epoch !== this._discoveryEpoch || this._lifecycle !== 'active') return false;
     if (!devices.length) return false;
     await this._attach(devices[0]);
     return true;
   }
 
   async _attach(device) {
+    if (this._lifecycle !== 'active') throw new Error('Pendant is being disconnected.');
+    const epoch = ++this._displayEpoch;
+    if (this.device && this.device !== device) {
+      this.device.removeEventListener('inputreport', this._onInput);
+      this._closeDevice(this.device).catch(() => {});
+    }
     this.device = device;
-    if (!device.opened) await device.open();
+    this.connected = false;
+    await this._deviceClosing.get(device);
+    if (epoch !== this._displayEpoch) throw new Error('Pendant connection was superseded.');
+    if (!device.opened) await this._openDevice(device);
+    if (epoch !== this._displayEpoch) {
+      if (this.device !== device) await this._closeDevice(device);
+      throw new Error('Pendant connection was superseded.');
+    }
     device.addEventListener('inputreport', this._onInput);
+    if (WHB04BWebHID.isSupported()) {
+      navigator.hid.addEventListener('connect', this._onConnect);
+      navigator.hid.addEventListener('disconnect', this._onDisconnect);
+    }
     this.connected = true;
     this.dispatchEvent(new CustomEvent('attach', { detail: { device } }));
+  }
+
+  _openDevice(device) {
+    const pending = this._deviceOpening.get(device);
+    if (pending) return pending;
+    const opening = Promise.resolve().then(() => device.open());
+    this._deviceOpening.set(device, opening);
+    const clear = () => this._deviceOpening.delete(device);
+    opening.then(clear, clear);
+    return opening;
+  }
+
+  _closeDevice(device) {
+    const pending = this._deviceClosing.get(device);
+    if (pending) return pending;
+    // Register before remove listeners can request reconnection.
+    const opening = this._deviceOpening.get(device);
+    const closing = Promise.resolve(opening).catch(() => {}).then(() => device.opened === false ? undefined : device.close());
+    this._deviceClosing.set(device, closing);
+    const clear = () => this._deviceClosing.delete(device);
+    closing.then(clear, clear);
+    return closing;
   }
 
   // Tear down the current device. Emits 'remove' when emit=true (physical
   // disconnect or destroy); keeps the navigator.hid listeners so a later
   // re-plug of an authorised device auto-attaches.
   _teardown(emit) {
+    this._displayEpoch++;
     if (this.device) {
       try { this.device.removeEventListener('inputreport', this._onInput); } catch { /* ignore */ }
       this.device = null;
@@ -142,6 +194,7 @@ export class WHB04BWebHID extends EventTarget {
   }
 
   _handleInput(e) {
+    if (!this.connected || e.currentTarget !== this.device) return;
     if (e.reportId !== INPUT_REPORT_ID) return;
     const body = new Uint8Array(e.data.buffer, e.data.byteOffset, e.data.byteLength);
     const bytes = new Uint8Array(body.length + 1);
@@ -155,23 +208,52 @@ export class WHB04BWebHID extends EventTarget {
 
   // Queues the frame behind any in-flight write so chunks never interleave.
   sendDisplayData(frame) {
-    const run = () => this._writeFrame(frame);
-    const p = this._writeChain.then(run, run);
-    // Keep the chain alive even if this write rejects; return the real result.
-    this._writeChain = p.catch(() => {});
-    return p;
+    return new Promise((resolve, reject) => {
+      const waiters = this._pendingDisplay?.waiters || [];
+      waiters.push({ resolve, reject });
+      this._pendingDisplay = { frame: frame.slice(), waiters, epoch: this._displayEpoch };
+      if (!this._displayWriter) this._displayWriter = this._drainDisplay();
+    });
   }
 
-  async _writeFrame(frame) {
+  async _drainDisplay() {
+    while (this._pendingDisplay) {
+      const { frame, waiters, epoch } = this._pendingDisplay;
+      this._pendingDisplay = null;
+      try {
+        await this._writeFrame(frame, epoch);
+        for (const waiter of waiters) waiter.resolve();
+      } catch (error) {
+        for (const waiter of waiters) waiter.reject(error);
+      }
+    }
+    this._displayWriter = null;
+  }
+
+  async _writeFrame(frame, epoch) {
+    if (this._lifecycle !== 'active') throw new Error('Pendant is being disconnected.');
     if (!this.device || !this.connected) throw new Error('Device not connected.');
+    const device = this.device;
     for (let i = 0; i < OUTPUT_PAYLOAD_SIZE; i += OUTPUT_CHUNK) {
+      if (this._lifecycle !== 'active' || epoch !== this._displayEpoch || device !== this.device || !this.connected) throw new Error('Device disconnected during LCD update.');
       const chunk = new Uint8Array(OUTPUT_CHUNK);
       chunk.set(frame.subarray(i, i + OUTPUT_CHUNK));
+      let timer;
       try {
-        await this.device.sendFeatureReport(OUTPUT_REPORT_ID, chunk);
-      } catch {
-        await this.device.sendReport(OUTPUT_REPORT_ID, chunk);
-      }
+        await Promise.race([
+          device.sendFeatureReport(OUTPUT_REPORT_ID, chunk),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => {
+              // Stop this connection before any further chunks can be sent.
+              if (epoch === this._displayEpoch && device === this.device) {
+                this._closeDevice(device).catch(() => {});
+                this._teardown(true);
+              }
+              reject(new Error('Pendant LCD feature report timed out; reconnect the pendant.'));
+            }, 1000);
+          }),
+        ]);
+      } finally { clearTimeout(timer); }
     }
   }
 
@@ -181,10 +263,24 @@ export class WHB04BWebHID extends EventTarget {
     await this.sendDisplayData(f);
   }
 
-  async destroy() {
+  destroy() {
+    if (this._destroyPromise) return this._destroyPromise;
+    this._lifecycle = 'destroying';
+    this._discoveryEpoch++;
+    this._displayEpoch++;
+    // Install the shared promise before teardown can dispatch remove and reenter.
+    this._destroyPromise = Promise.resolve().then(() => this._destroy()).finally(() => {
+      this._lifecycle = 'active';
+      this._destroyPromise = null;
+    });
+    return this._destroyPromise;
+  }
+
+  async _destroy() {
     const dev = this.device;
+    const closing = dev ? this._closeDevice(dev) : Promise.resolve();
     this._teardown(true);
-    if (dev) { try { await dev.close(); } catch { /* ignore */ } }
+    try { await closing; } catch { /* reconnect will report the close failure */ }
     if (WHB04BWebHID.isSupported()) {
       navigator.hid.removeEventListener('connect', this._onConnect);
       navigator.hid.removeEventListener('disconnect', this._onDisconnect);

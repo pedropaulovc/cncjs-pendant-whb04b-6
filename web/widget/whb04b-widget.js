@@ -17,11 +17,12 @@
 // client version always matches the CNCjs server (2.x).
 
 import {
-  WHB04BWebHID, buildDisplayFrame, JogMode, CoordinateSystem,
+  WHB04BWebHID, buildDisplayFrame, JogMode,
 } from '../whb04b-webhid.js';
 import { CncjsSession, isParentMessage } from './cncjs-session.js';
 import { Grbl } from './grbl.js';
 import { PendantControls, CONFIG_KEY, parseConfig } from './pendant-controls.js';
+import { controllerDisplayFrame } from './pendant-display.js';
 
 //---------------------------------------------------------------------------
 // Credential + context acquisition from the parent frame
@@ -90,6 +91,7 @@ const session = new CncjsSession({
     setPill('sockPill', status.phase === 'joined', status.phase);
     refreshCtxUI();
     if (status.detail) log(status.detail);
+    onControllerState('Grbl', session.state);
   },
   onState: onControllerState,
 });
@@ -116,20 +118,34 @@ function connectSocket() {
 }
 
 // Push live machine coordinates / feed to the pendant LCD.
-function onControllerState(type, state) {
-  const st = state?.status || {};
-  const pos = (controls.coordinates === 'machine' ? st.mpos : st.wpos) || {};
-  const x = Number(pos.x) || 0, y = Number(pos.y) || 0, z = Number(pos.z) || 0;
-  const feed = Number(st.feedrate) || 0;
-  const spindle = Number(st.spindle) || 0;
-  if (pendant.connected) {
-    pendant.sendDisplayData(buildDisplayFrame({ jogMode, coordinateSystem: controls.coordinates === 'work' ? CoordinateSystem.X1Y1Z1 : CoordinateSystem.XYZ, x, y, z, feedRate: feed, spindleRate: spindle }))
-      .catch(() => { /* device may be busy */ });
+let displayError = '';
+let displayNotice = '';
+async function onControllerState(type, state) {
+  if (!pendant.connected) return;
+  try {
+    const unsupportedAxes = [0x14, 0x15, 0x16].includes(controls.axisCode);
+    const unavailable = session.status.phase !== 'joined' || unsupportedAxes;
+    const frame = unavailable ? buildDisplayFrame({ jogMode: JogMode.Reset })
+      : controllerDisplayFrame(state, { coordinates: controls.coordinates, jogMode, reportUnits: session.settings.settings?.$13 });
+    const notice = unsupportedAxes ? 'Pendant LCD: A/B/C positions unavailable on this XYZ GRBL integration; showing RESET.'
+      : !frame ? 'Pendant LCD: waiting for complete coordinates, Ov overrides, $13 report units, and G20/G21 mode.' : '';
+    if (notice && notice !== displayNotice) log(notice);
+    displayNotice = notice;
+    if (!frame) return;
+    await pendant.sendDisplayData(frame);
+    if (displayError) log('Pendant LCD updates restored.');
+    displayError = '';
+  } catch (error) {
+    const message = `Pendant LCD update failed: ${error.message}`;
+    if (displayError !== message) log(message);
+    displayError = message;
   }
 }
 
 function handleInput(d) {
+  const previousAxis = controls.axisCode;
   if (!document.hidden) controls.handleInput(d);
+  if (previousAxis !== controls.axisCode) onControllerState('Grbl', session.state);
 
   // mirror to UI
   $('k1').textContent = d.firstKey; $('k2').textContent = d.secondKey;
@@ -167,7 +183,7 @@ function boot() {
   listenParentMessages(refreshCtxUI);
   refreshCtxUI();
 
-  pendant.addEventListener('attach', () => { setPill('hidPill', true, 'pendant ✓'); log('Pendant connected.'); });
+  pendant.addEventListener('attach', () => { setPill('hidPill', true, 'pendant ✓'); log('Pendant connected.'); onControllerState('Grbl', session.state); });
   pendant.addEventListener('remove', () => { controls.suspend(); grbl.clearOverrides(); controls.keys.clear(); setPill('hidPill', false, 'pendant ✗'); log('Pendant removed.'); });
   pendant.addEventListener('use', (e) => handleInput(e.detail));
 
