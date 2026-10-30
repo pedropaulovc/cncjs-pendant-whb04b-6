@@ -137,8 +137,8 @@ export class Grbl {
     const value = Number(this.settings[`$${110 + index}`]);
     return index >= 0 && Number.isFinite(value) && value > 0 ? value : null;
   }
-  position(axis) {
-    const report = this.session.positionReport;
+  position(axis, kind) {
+    const report = kind ? this.session.positionReports?.[kind] : this.session.positionReport;
     const units = Number(report?.units);
     if (!report || ![0, 1].includes(units)) return null;
     const value = report.values[['X', 'Y', 'Z'].indexOf(axis)];
@@ -151,7 +151,7 @@ export class Grbl {
   jogCompleted() {
     if (this.activeState !== 'Idle') return false;
     if (!this.jogTarget) return this.session.reportSequence >= this.jogSequence + 2 && this.session.idleReports >= 2;
-    const position = this.position(this.jogTarget.axis);
+    const position = this.position(this.jogTarget.axis, this.jogTarget.kind);
     if (!position || position.sequence <= this.jogPositionSequence || position.kind !== this.jogTarget.kind || position.units !== this.jogTarget.units) return false;
     const tolerance = Math.max(position.resolution, this.jogTarget.resolution) + 1e-8;
     // A stale Idle report at the starting point cannot confirm completion.
@@ -219,8 +219,9 @@ export class Grbl {
     if (!this.manualReady('allow-jog')) return this.refuse('Jog: controller must be idle or jogging with no running program.');
     const max = this.maxRate(axis);
     if (!max) return this.refuse(`Jog: waiting for GRBL ${axis} maximum-rate setting.`);
-    const position = this.position(axis);
-    const previous = this.jogPhase === 'active' && !this.jogCompleted() && this.jogTarget?.axis === axis ? this.jogTarget : position;
+    const pending = this.jogPhase === 'active' && !this.jogCompleted() && this.jogTarget?.axis === axis ? this.jogTarget : null;
+    const position = this.position(axis, pending?.kind);
+    const previous = pending || position;
     const result = this.gcode(`$J=G21 G91 ${axis}${distance.toFixed(4)} F${Math.min(feed, max).toFixed(3)}`);
     if (result === 'dropped') return result;
     this.jogPhase = 'active';

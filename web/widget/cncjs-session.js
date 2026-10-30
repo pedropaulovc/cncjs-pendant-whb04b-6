@@ -17,8 +17,9 @@ export class CncjsSession {
     this.overrideSequence = 0;
     this.overrides = [];
     this.positionReport = null;
+    this.positionReports = {};
     this.positionSequence = 0;
-    this.statePositionSignature = '';
+    this.statePositionSignatures = {};
     this.motionState = '';
     this.motionEpoch = 0;
     this.activeState = '';
@@ -44,7 +45,8 @@ export class CncjsSession {
     this.activeState = '';
     this.overrides = [];
     this.positionReport = null;
-    this.statePositionSignature = '';
+    this.positionReports = {};
+    this.statePositionSignatures = {};
     this.motionState = '';
     this.idleReports = 0;
     this.generation += 1;
@@ -109,12 +111,11 @@ export class CncjsSession {
       if (type !== 'Grbl') return;
       this.state = state;
       const status = state?.status || {};
-      const kind = status.mpos ? 'MPos' : 'WPos';
-      const position = status.mpos || status.wpos;
-      const words = ['x', 'y', 'z'].map(axis => position?.[axis]);
-      const signature = JSON.stringify([status.activeState, ...words]);
-      if (signature !== this.statePositionSignature && words.every(value => value !== undefined)) {
-        this.statePositionSignature = signature;
+      for (const [kind, position] of [['MPos', status.mpos], ['WPos', status.wpos]]) {
+        const words = ['x', 'y', 'z'].map(axis => position?.[axis]);
+        const signature = JSON.stringify([status.activeState, ...words]);
+        if (signature === this.statePositionSignatures[kind] || words.some(value => value === undefined)) continue;
+        this.statePositionSignatures[kind] = signature;
         this.recordPosition(kind, words.map(String), status.activeState);
       }
       if (Array.isArray(state?.status?.ov) && state.status.ov.length === 3) this.overrides = state.status.ov.map(Number);
@@ -132,8 +133,9 @@ export class CncjsSession {
         this.motionState = '';
         this.activeState = '';
         this.positionReport = null;
+        this.positionReports = {};
         this.overrides = [];
-        this.statePositionSignature = '';
+        this.statePositionSignatures = {};
         this.state = {};
       }
       const state = typeof line === 'string' ? /^<([^|>]+)/.exec(line)?.[1] : null;
@@ -163,6 +165,7 @@ export class CncjsSession {
     this.positionReport = { kind, values, sequence: ++this.positionSequence,
       units: this.settings.settings?.$13,
       resolution: Math.max(...words.map(word => 10 ** -(word.split('.')[1]?.length || 0))) };
+    this.positionReports[kind] = this.positionReport;
   }
 
   join(ports) {

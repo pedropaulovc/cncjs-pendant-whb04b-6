@@ -18,6 +18,7 @@ function fixture() {
     state: { parserstate: { spindle: '500', modal: { spindle: 'M5', coolant: 'M9' } } },
     settings: { settings: { $110: '3000', $111: '3000', $112: '1000', $30: '1000', $31: '0' } },
     command: (...args) => { commands.push(args); return 'sent'; }, stop: () => commands.push(['stop']) };
+  Object.defineProperty(session, 'positionReports', { get: () => ({ [session.positionReport.kind]: session.positionReport }) });
   const grbl = new Grbl(session, () => 20, message => logs.push(message), timer);
   const controls = new PendantControls(grbl, { ...timer, log: message => logs.push(message) });
   let current = { firstKeyCode: 0, secondKeyCode: 0, leftDialCode: 0x11, rightDialCode: 0x0f, jog: 0 };
