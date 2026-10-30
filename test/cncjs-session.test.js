@@ -321,14 +321,15 @@ test('port close disarms commands and resumes discovery without closing hardware
 
 test('jog and fixed-distance macros use mm even after a prior G20 command', () => {
   const commands = [];
-  const grbl = new Grbl({ command: (...args) => commands.push(args) }, () => 12.5);
-  grbl.jog('X', -2, 0x0f);
-  assert.deepEqual(commands.pop(), ['gcode', '$J=G21 G91 X-0.2000 F250']);
+  const grbl = new Grbl({ command: (...args) => commands.push(args), status: { phase: 'joined' },
+    stopPhase: 'idle', workflowState: 'idle', activeState: 'Idle', settings: { settings: { $110: '3000' } } }, () => 12.5);
+  grbl.jog('X', -0.2, 250);
+  assert.deepEqual(commands.pop(), ['gcode', '$J=G21 G91 X-0.2000 F250.000']);
   grbl.wcsHome();
-  assert.deepEqual(commands.splice(0), [['gcode', 'G21 G53 G0 G90 Z-5'], ['gcode', 'G21 G54 G0 G90 X0 Y0']]);
+  assert.deepEqual(commands.splice(0), [['gcode', ['G21 G53 G0 G90 Z-5', 'G21 G54 G0 G90 X0 Y0']]]);
   grbl.probeZ();
-  assert.equal(commands[0][1], 'G21 G91');
-  assert.equal(commands[2][1], 'G10 L20 P1 Z12.501');
+  assert.equal(commands[0][1][0], 'G21 G91');
+  assert.equal(commands[0][1][2], 'G10 L20 P1 Z12.501');
 });
 
 test('a canceled poll callback cannot send commands to a new port', () => {
@@ -398,4 +399,19 @@ test('changing a pending join clears workflow state and ignores its old callback
   f.emitted.findLast(([event]) => event === 'open')[3](null);
   f.session.stop(); report(f, 'Idle'); report(f, 'Idle');
   assert.equal(stopCommands(f).some(([name]) => name === 'feedhold' || name === 'reset'), false);
+});
+
+test('state/settings and raw status caches are isolated per controller generation', () => {
+  const f = fixture(); f.join();
+  f.socket.receive('controller:settings', 'Grbl', {settings: {$110:'3000'}});
+  f.socket.receive('controller:state', 'Grbl', {status:{ov:[100,100,100]}});
+  f.socket.receive('serialport:read', '<Idle|MPos:0,0,0|Ov:101,100,99>');
+  assert.equal(f.session.settings.settings.$110,'3000');
+  assert.deepEqual(f.session.overrides,[101,100,99]);
+  assert.equal(f.session.overrideSequence,1);
+  assert.equal(f.session.idleReports,1);
+  report(f,'Jog'); assert.equal(f.session.idleReports,0);
+  f.session.selectPort('COM2');
+  assert.deepEqual(f.session.state,{}); assert.deepEqual(f.session.settings,{});
+  assert.deepEqual(f.session.overrides,[]); assert.equal(f.session.activeState,'');
 });

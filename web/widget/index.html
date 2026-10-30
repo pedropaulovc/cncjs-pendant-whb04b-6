@@ -52,9 +52,15 @@
 
   <details>
     <summary>Pendant settings</summary>
-    <p style="font-size:.75rem">Step feed is mm/min; spindle increment is RPM. Large steps enable 5/10 mm.
-      Macro slots: 1, 2, 5, 6, 7, 9, 11, 12, 13, 14. Enter G-code strings; use \n between lines.</p>
-    <textarea id="config" rows="9" style="width:100%;box-sizing:border-box" aria-label="Pendant settings JSON"></textarea>
+    <div class="row">
+      <label class="field">Step feed (mm/min)<input id="stepFeed" type="number" min="0.001" step="1" value="250" /></label>
+      <label class="field">Spindle increment (RPM)<input id="spindleIncrement" type="number" min="1" value="100" /></label>
+      <label class="field">5/10 mm steps<select id="largeSteps"><option value="disabled">Disabled</option><option value="enabled">Enabled</option></select></label>
+    </div>
+    <details><summary>Advanced: G-code macros</summary>
+      <p style="font-size:.75rem">JSON slots: 1, 2, 5, 6, 7, 9, 11, 12, 13, 14. Example: {"1":"G0 X0"}. Use \n between lines.</p>
+      <textarea id="config" rows="6" style="width:100%;box-sizing:border-box" aria-label="G-code macros JSON"></textarea>
+    </details>
     <button id="saveConfig">Save settings</button>
   </details>
   <h2 style="font-size:.8rem;margin:10px 0 4px">Log</h2>

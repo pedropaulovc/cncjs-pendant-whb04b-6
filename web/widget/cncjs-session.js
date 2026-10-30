@@ -13,6 +13,9 @@ export class CncjsSession {
     this.state = {};
     this.settings = {};
     this.reportSequence = 0;
+    this.idleReports = 0;
+    this.overrideSequence = 0;
+    this.overrides = [];
     this.activeState = '';
     this.selection = 'automatic';
     this.selectedPort = null;
@@ -34,6 +37,8 @@ export class CncjsSession {
     this.state = {};
     this.settings = {};
     this.activeState = '';
+    this.overrides = [];
+    this.idleReports = 0;
     this.generation += 1;
     this.pendingPort = null;
     this.status.port = null;
@@ -95,6 +100,7 @@ export class CncjsSession {
     on('controller:state', (type, state) => {
       if (type !== 'Grbl') return;
       this.state = state;
+      if (Array.isArray(state?.status?.ov) && state.status.ov.length === 3) this.overrides = state.status.ov.map(Number);
       this.onState(type, state);
     });
     on('controller:settings', (type, settings) => {
@@ -105,7 +111,13 @@ export class CncjsSession {
     });
     on('serialport:read', line => {
       const state = typeof line === 'string' ? /^<([^|>]+)/.exec(line)?.[1] : null;
-      if (state) { this.activeState = state; this.reportSequence += 1; }
+      if (state) {
+        this.activeState = state;
+        this.reportSequence += 1;
+        this.idleReports = state === 'Idle' ? this.idleReports + 1 : 0;
+      }
+      const overrides = typeof line === 'string' ? /\|Ov:(\d+),(\d+),(\d+)/.exec(line) : null;
+      if (overrides) { this.overrides = overrides.slice(1).map(Number); this.overrideSequence += 1; }
       this.stopReport(line);
     });
     on('serialport:list', (ports) => this.join(ports));

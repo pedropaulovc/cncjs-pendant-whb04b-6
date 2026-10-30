@@ -92,22 +92,97 @@ npm run serve   # serves web/ at http://localhost:8000
 Open `http://localhost:8000/index.html`, click **Connect pendant**, then watch
 the live key/dial/jog readout and push coordinates to the LCD.
 
-## Button layout
+## Pendant controls
 
-| Button | Function |
-|--------|----------|
-| Reset | Controller soft reset |
-| Stop | Cancel jogs and queued commands; hold a running program, then reset after motion stops |
-| Start/Pause | Cycle start |
-| M-Home | Homing |
-| Safe-Z | Move to safe Z height |
-| W-Home | Move to G54 work zero |
-| S on/off | Spindle off |
-| Probe-Z | Z touch probe |
-| Continuous / Step | Jog mode |
+The mappings follow [LinuxCNC's xhc-whb04b-6 driver](https://www.linuxcnc.org/docs/master/html/en/man/man1/xhc-whb04b-6.1.html)
+with its feed and spindle wheel overrides enabled (`-f -s`). The widget starts
+in **MPG** mode. Press **Step** to jog by distance or **Continuous** to jog while
+turning the wheel. The current mode appears above the input readout.
 
-The left dial selects the axis (X/Y/Z/A/B/C), the right dial selects the step
-size and feed rate, and the wheel jogs.
+| Control | Action |
+|---------|--------|
+| Reset | GRBL soft reset |
+| Stop | Cancel jogs/queued commands; hold a program and reset after motion stops |
+| Start/Pause | Start the loaded CNCjs program, pause it, or resume it |
+| Feed + / - | Feed override +1 / -1 percentage point |
+| Spindle + / - | Spindle override +1 / -1 percentage point |
+| M-Home | GRBL homing |
+| Safe-Z | Machine Z = -5 mm |
+| W-Home | Safe-Z, then G54 X0 Y0 |
+| S on/off | Stop a running spindle or start it at its programmed S speed |
+| Probe-Z | Z touch probe using the plate thickness field |
+| Continuous / Step | Select the jogging mode |
+| Macro-10 | Toggle the pendant LCD between work and machine coordinates |
+| Fn + Spindle + / - | Increase/decrease programmed S speed (100 RPM by default) |
+| Fn + S on/off | Select the next spindle start direction; spindle must be stopped |
+| Fn + Continuous / Step | Toggle flood / mist coolant |
+
+Hold **Fn first**, then the other key. Each press executes once; holding a key
+while wheel reports arrive does not repeat it. Fn combinations work with either
+key-byte order reported by the receiver.
+
+The remaining Fn combinations run operator-configured G-code macros:
+
+| Fn + button | Macro slot |
+|-------------|------------|
+| Feed + / Feed - | 1 / 2 |
+| M-Home / Safe-Z / W-Home | 5 / 6 / 7 |
+| Probe-Z | 9 |
+| Reset / Stop / Start-Pause | 11 / 12 / 13 |
+| Macro-10 | 14 |
+
+Configure these under **Pendant settings → Advanced: G-code macros**. For example,
+`{"1":"G0 X0","2":"G0 Y0"}` assigns Fn+Feed+ and Fn+Feed-. An unconfigured macro
+only logs its slot number. Bare Reset and Stop retain their normal behavior.
+
+### Wheel and selector
+
+- **MPG:** each wheel detent changes feed override by one percentage point.
+- **Lead:** each detent changes spindle override by one percentage point. Both
+  known Lead codes (`0x1c` and `0x9b`) are recognized. Lead never moves an axis.
+  Leaving Lead returns to MPG.
+- **Step:** each detent moves 0.001, 0.01, 0.1, 1, 5, or 10 mm according to the
+  selector. The last two positions require **5/10 mm steps → Enabled**, matching
+  LinuxCNC's opt-in big-step option. A step finishes after the wheel stops.
+- **Continuous:** the selector chooses 2, 5, 10, 30, 60, or 100% of the selected
+  axis's GRBL maximum rate (`$110`–`$112`). Motion is issued as at most one
+  200 ms travel segment per 200 ms; a 180 ms gap between wheel reports cancels
+  the jog. Direction, axis, and mode changes also cancel it. New motion waits
+  for two fresh Idle reports after cancellation. Browser/serial latency and
+  GRBL deceleration add to the stopping time.
+
+In MPG or Continuous, moving the selector also sets the feed override to its
+percentage. GRBL's 10–200% override range clamps the 2% and 5% selections to 10%
+for **program feed override**; Continuous jogging still uses the selected 2% or
+5% of axis maximum velocity. The initial selector report does not change feed
+when the widget connects. GRBL feed overrides do not affect `$J` jogging.
+
+Overrides wait for confirming GRBL `Ov` reports before sending the next realtime
+byte, because GRBL can combine duplicate bytes received together. Pending changes
+are discarded on reset, Stop, disconnect, or after three seconds without a
+confirming report. Their result follows controller feedback, not a local counter.
+
+### Settings and GRBL limits
+
+**Pendant settings** provides step feed (250 mm/min by default), spindle speed
+increment, and the large-step option. Changes are stored in browser localStorage
+under `whb04b-controls`, separately for each browser/profile and CNCjs origin.
+Step feed is capped by the selected axis's GRBL maximum rate. Jogging waits for
+controller settings instead of guessing a machine speed.
+
+Only XYZ axes are supported by stock GRBL; A/B/C and Off do not jog. Macros,
+homing, spindle G-code, and coolant G-code require an idle controller with no
+running program. Feed/spindle realtime overrides remain usable during a program.
+Programmed spindle speed changes are bounded by `$30`/`$31`; set a positive S
+speed before turning the spindle on. Reversing direction requires stopping the
+spindle first. Mist needs firmware compiled with M7 support. Unsupported commands
+are reported by CNCjs.
+
+LinuxCNC's HAL machine power, hardware E-stop, joint/teleop modes, and arbitrary
+HAL pin wiring have no stock GRBL equivalents. Reset remains a software reset.
+Macro-10 changes the pendant LCD only; it does not change the CNCjs or EL400 view.
+USB removal, hiding the browser tab, and leaving the page cancel pendant jogging;
+network loss can only be bounded by the already-issued finite jog segment.
 
 Stop waits for GRBL 1.1 to report a completed hold (`Hold:0`) before resetting
 programmed motion. It leaves an idle controller idle when no program is running

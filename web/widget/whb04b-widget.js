@@ -21,7 +21,7 @@ import {
 } from '../whb04b-webhid.js';
 import { CncjsSession, isParentMessage } from './cncjs-session.js';
 import { Grbl } from './grbl.js';
-import { PendantControls, DEFAULT_CONFIG, CONFIG_KEY, parseConfig } from './pendant-controls.js';
+import { PendantControls, CONFIG_KEY, parseConfig } from './pendant-controls.js';
 
 let zProbeThickness = 20.0;   // touch-plate thickness (mm)
 
@@ -87,7 +87,7 @@ const session = new CncjsSession({
   io: (...args) => io(...args),
   origin: location.origin,
   onStatus(status) {
-    if (status.phase !== 'joined') controls.suspend();
+    if (status.phase !== 'joined') { controls.suspend(); grbl.clearOverrides(); }
     ctx.port = status.port;
     setPill('sockPill', status.phase === 'joined', status.phase);
     refreshCtxUI();
@@ -150,10 +150,13 @@ function wireUI() {
   const config = $('config');
   try { controls.setConfig(parseConfig(JSON.parse(localStorage.getItem(CONFIG_KEY) || '{}'))); }
   catch (error) { log(`Pendant settings: ${error.message}`); }
-  config.value = JSON.stringify(controls.config, null, 2);
+  config.value = JSON.stringify(controls.config.macros, null, 2);
+  $('stepFeed').value = controls.config.stepFeed;
+  $('spindleIncrement').value = controls.config.spindleIncrement;
+  $('largeSteps').value = controls.config.largeSteps;
   $('saveConfig').onclick = () => {
     try {
-      const value = parseConfig(JSON.parse(config.value));
+      const value = parseConfig({ macros: JSON.parse(config.value), stepFeed: Number($('stepFeed').value), spindleIncrement: Number($('spindleIncrement').value), largeSteps: $('largeSteps').value });
       controls.setConfig(value);
       localStorage.setItem(CONFIG_KEY, JSON.stringify(value));
       log('Pendant settings saved for this browser and CNCjs address.');
@@ -169,7 +172,7 @@ function boot() {
   refreshCtxUI();
 
   pendant.addEventListener('attach', () => { setPill('hidPill', true, 'pendant ✓'); log('Pendant connected.'); });
-  pendant.addEventListener('remove', () => { controls.suspend(); controls.keys.clear(); setPill('hidPill', false, 'pendant ✗'); log('Pendant removed.'); });
+  pendant.addEventListener('remove', () => { controls.suspend(); grbl.clearOverrides(); controls.keys.clear(); setPill('hidPill', false, 'pendant ✗'); log('Pendant removed.'); });
   pendant.addEventListener('use', (e) => handleInput(e.detail));
 
   // Re-attach to an already-authorised pendant without a prompt.
@@ -185,6 +188,6 @@ function boot() {
 }
 
 document.addEventListener('DOMContentLoaded', boot);
-window.addEventListener('pagehide', () => { controls.suspend(); session.disconnect(); });
+window.addEventListener('pagehide', () => { controls.suspend(); grbl.clearOverrides(); session.disconnect(); });
 document.addEventListener('visibilitychange', () => { if (document.hidden) controls.suspend(); });
 

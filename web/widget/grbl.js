@@ -1,7 +1,9 @@
 // GRBL 1.1 commands through the already-joined CNCjs session.
 export class Grbl {
-  constructor(session, getProbeThickness = () => 20, log = () => {}) {
-    Object.assign(this, { session, getProbeThickness, log });
+  constructor(session, getProbeThickness = () => 20, log = () => {}, { schedule = (fn, ms) => setTimeout(fn, ms), cancel = id => clearTimeout(id), now = () => performance.now() } = {}) {
+    Object.assign(this, { session, getProbeThickness, log, schedule, cancel, now });
+    this.pendingOverrides = new Map();
+    this.overrideTimer = null;
     this.jogPhase = 'idle';
     this.jogGeneration = null;
     this.cancelSequence = 0;
@@ -12,8 +14,8 @@ export class Grbl {
   get activeState() { return this.session.activeState || this.state.status?.activeState || ''; }
   _cmd(directive, data) { return this.session.command(directive, data); }
   gcode(g) { return this._cmd('gcode', g); }
-  reset() { this.jogPhase = 'idle'; this._cmd('reset'); }
-  stop() { this.jogPhase = 'idle'; this.session.stop(); }
+  reset() { this.clearOverrides(); this.jogPhase = 'idle'; this._cmd('reset'); }
+  stop() { this.clearOverrides(); this.jogPhase = 'idle'; this.session.stop(); }
   refuse(message) { this.log(message); return 'dropped'; }
   manualReady(allowJog = 'idle-only') {
     if (this.session.status?.phase !== 'joined' || this.session.stopPhase !== 'idle') return false;
@@ -27,15 +29,57 @@ export class Grbl {
     if (this.manualReady()) return this._cmd('gcode:start');
     return this.refuse('Start/Pause: wait for a known idle, running, or paused state.');
   }
+  clearOverrides() {
+    if (this.overrideTimer !== null) this.cancel(this.overrideTimer);
+    this.overrideTimer = null;
+    this.pendingOverrides.clear();
+  }
+  overrideTarget(kind, target) {
+    const current = this.pendingOverrides.get(kind)?.target ?? this.session.overrides?.[kind === 'feed' ? 0 : 2];
+    if (!Number.isFinite(target) || !Number.isFinite(current)) return this.refuse('Override: waiting for GRBL Ov status.');
+    const bounded = Math.max(10, Math.min(200, target));
+    if (bounded !== target) this.log(`GRBL override minimum is 10%; requested ${target}% uses ${bounded}%.`);
+    return this.override(kind, bounded - current);
+  }
   override(kind, delta) {
-    if (!['feed', 'spindle'].includes(kind) || !Number.isInteger(delta) || Math.abs(delta) > 127) return 'dropped';
-    const direction = Math.sign(delta);
-    for (let remaining = Math.abs(delta); remaining > 0;) {
-      const amount = remaining >= 10 ? 10 : 1;
-      if (this._cmd(`${kind}Override`, direction * amount) === 'dropped') return 'dropped';
-      remaining -= amount;
-    }
+    if (!['feed', 'spindle'].includes(kind) || !Number.isInteger(delta) || Math.abs(delta) > 200) return 'dropped';
+    if (this.session.status?.phase !== 'joined' || this.session.stopPhase !== 'idle') return this.refuse('Override: no ready GRBL connection.');
+    const current = this.session.overrides?.[kind === 'feed' ? 0 : 2];
+    if (!Number.isFinite(current)) { this._cmd('statusreport'); return this.refuse('Override: waiting for GRBL Ov status.'); }
+    let pending = this.pendingOverrides.get(kind);
+    if (pending?.generation !== this.session.generation) pending = null;
+    if (!pending) pending = { target: current, expected: null, generation: this.session.generation, deadline: this.now() + 3000 };
+    pending.target = Math.max(10, Math.min(200, pending.target + delta));
+    this.pendingOverrides.set(kind, pending);
+    this.flushOverrides();
     return 'sent';
+  }
+  flushOverrides() {
+    if (this.overrideTimer !== null) this.cancel(this.overrideTimer);
+    this.overrideTimer = null;
+    for (const [kind, pending] of this.pendingOverrides) {
+      if (pending.generation !== this.session.generation || this.session.status?.phase !== 'joined' || this.session.stopPhase !== 'idle') {
+        this.pendingOverrides.delete(kind);
+        continue;
+      }
+      if (this.now() >= pending.deadline) {
+        this.pendingOverrides.delete(kind);
+        this.log(`${kind} override: no confirming status; remaining changes discarded.`);
+        continue;
+      }
+      const current = this.session.overrides?.[kind === 'feed' ? 0 : 2];
+      if (pending.expected !== null && (this.session.overrideSequence <= pending.sequence || current !== pending.expected)) continue;
+      if (current === pending.target) { this.pendingOverrides.delete(kind); continue; }
+      const difference = pending.target - current;
+      const amount = Math.sign(difference) * (Math.abs(difference) >= 10 ? 10 : 1);
+      if (this._cmd(`${kind}Override`, amount) === 'dropped') { this.pendingOverrides.delete(kind); continue; }
+      pending.expected = current + amount;
+      pending.sequence = this.session.overrideSequence;
+      pending.deadline = this.now() + 3000;
+    }
+    if (!this.pendingOverrides.size) return;
+    this._cmd('statusreport');
+    this.overrideTimer = this.schedule(() => this.flushOverrides(), 250);
   }
   homing() {
     if (!this.manualReady() && this.activeState !== 'Alarm') return this.refuse('Homing: stop the program and motion first.');
@@ -99,10 +143,10 @@ export class Grbl {
     this._cmd('statusreport');
   }
   jog(axis, distance, feed) {
-    if (!['X', 'Y', 'Z'].includes(axis) || !Number.isFinite(distance) || distance === 0 || !(feed > 0)) return this.refuse('Jog requires an XYZ axis and finite distance/feed.');
+    if (!['X', 'Y', 'Z'].includes(axis) || !Number.isFinite(distance) || Math.abs(distance) < 0.00005 || !Number.isFinite(feed) || !(feed > 0)) return this.refuse('Jog requires an XYZ axis and finite distance/feed.');
     if (this.jogGeneration !== this.session.generation) this.jogPhase = 'idle';
     if (this.jogPhase === 'canceling') {
-      if (this.session.reportSequence <= this.cancelSequence || this.activeState !== 'Idle') return this.refuse('Jog: waiting for cancellation to finish.');
+      if (this.session.reportSequence < this.cancelSequence + 2 || this.session.idleReports < 2 || this.activeState !== 'Idle') return this.refuse('Jog: waiting for cancellation to finish.');
       this.jogPhase = 'idle';
     }
     if (!this.manualReady('allow-jog')) return this.refuse('Jog: controller must be idle or jogging with no running program.');

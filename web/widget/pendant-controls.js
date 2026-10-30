@@ -84,14 +84,18 @@ export class PendantControls {
     const pressed = [...keys].filter(code => !this.keys.has(code));
     this.keys = keys;
     if (this.axisCode !== report.leftDialCode || this.rateCode !== report.rightDialCode) this.suspend();
+    const previousRate = this.rateCode;
     const wasLead = LEAD.has(this.rateCode);
     this.axisCode = report.leftDialCode;
     this.rateCode = report.rightDialCode;
     if (LEAD.has(this.rateCode) && this.mode !== 'lead') this.setMode('lead');
     if (wasLead && !LEAD.has(this.rateCode)) this.setMode('mpg');
     for (const code of pressed) this.key(code, modifier);
+    if (previousRate !== null && previousRate !== this.rateCode && ['mpg', 'continuous'].includes(this.mode) && SELECTORS[this.rateCode]) {
+      this.grbl.overrideTarget('feed', SELECTORS[this.rateCode].percent);
+    }
     // A button press and wheel delta in one packet must not start new motion.
-    if (keys.size || !Number.isInteger(report.jog) || !report.jog || Math.abs(report.jog) > 127) return;
+    if (keys.size || modifier === 'fn' || !Number.isInteger(report.jog) || !report.jog || Math.abs(report.jog) > 127) return;
     if (this.axisCode === 0x06) return;
     if (!AXES[this.axisCode]) { this.log('GRBL supports XYZ; A/B/C wheel input ignored.'); return; }
     if (LEAD.has(this.rateCode)) { this.grbl.override('spindle', report.jog); return; }
