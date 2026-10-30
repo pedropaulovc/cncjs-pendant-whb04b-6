@@ -165,3 +165,11 @@ test('Continuous never queues behind a slow segment and never starts motion from
   assert.equal(f.commands.filter(([c])=>c==='gcode').length,2);
   f.timer.advance(180); assert.equal(f.timer.timers.size,0);
 });
+
+test('invalid probe thickness refuses motion while an explicit zero remains valid', () => {
+  const f=fixture(); f.grbl.getProbeThickness=()=>NaN;
+  assert.equal(f.grbl.probeZ(),'dropped'); assert.deepEqual(f.commands,[]);
+  assert.match(f.logs.at(-1),/valid nonnegative probe plate thickness/);
+  f.grbl.getProbeThickness=()=>0; f.grbl.probeZ();
+  assert.equal(f.commands[0][1][2],'G10 L20 P1 Z0.001');
+});

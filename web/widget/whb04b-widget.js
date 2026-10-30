@@ -146,7 +146,7 @@ function wireUI() {
   };
   $('reconnectSock').onclick = () => { readParentStore(); refreshCtxUI(); connectSocket(); };
   const thick = $('thickness');
-  if (thick) thick.onchange = () => { zProbeThickness = Number(thick.value); };
+  if (thick) thick.onchange = () => { zProbeThickness = thick.valueAsNumber; };
   const config = $('config');
   try { controls.setConfig(parseConfig(JSON.parse(localStorage.getItem(CONFIG_KEY) || '{}'))); }
   catch (error) { log(`Pendant settings: ${error.message}`); }
