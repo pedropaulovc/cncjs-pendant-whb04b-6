@@ -126,6 +126,18 @@ test('interrupted program cancellation retains its intent after workflow becomes
   assert.equal(stopCommands(f).at(-1)[0], 'reset');
 });
 
+test('interrupted program cancellation cannot reset a different idle port', () => {
+  const f = fixture(); f.join('COM1');
+  f.socket.receive('workflow:state', 'running'); f.session.stop();
+  f.session.selectPort('COM2'); f.join('COM2');
+  f.socket.receive('workflow:state', 'idle');
+  const count = stopCommands(f).length;
+  f.session.stop(); report(f, 'Idle'); report(f, 'Idle');
+  assert.equal(f.session.stopPhase, 'idle');
+  assert.equal(f.session.stopPort, null);
+  assert.equal(stopCommands(f).slice(count).some(([name]) => name === 'feedhold' || name === 'reset'), false);
+});
+
 test('workflow state from a previous port cannot make a new idle port reset', () => {
   const f = fixture(); f.join(); f.socket.receive('workflow:state', 'running');
   f.session.selectPort('COM2'); f.join('COM2'); f.session.stop();

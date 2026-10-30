@@ -7,6 +7,7 @@ export class CncjsSession {
     this.stopTimer = null;
     this.stopPhase = 'idle';
     this.stopIntent = 'motion';
+    this.stopPort = null;
     this.workflowState = 'unknown';
     this.selection = 'automatic';
     this.selectedPort = null;
@@ -24,8 +25,9 @@ export class CncjsSession {
   clear() {
     const interrupted = this.stopPhase !== 'idle';
     const intent = this.stopIntent;
+    const stopPort = this.stopPort;
     this.finishStop();
-    if (interrupted) { this.stopPhase = 'interrupted'; this.stopIntent = intent; }
+    if (interrupted) { this.stopPhase = 'interrupted'; this.stopIntent = intent; this.stopPort = stopPort; }
     this.workflowState = 'unknown';
     this.generation += 1;
     this.pendingPort = null;
@@ -153,8 +155,9 @@ export class CncjsSession {
     if (!['idle', 'interrupted'].includes(this.stopPhase)) return;
     // A dwell reports Idle while the sender is still running. Preserve this
     // intent before gcode:stop changes workflow state, including after reconnect.
-    const retryProgram = this.stopPhase === 'interrupted' && this.stopIntent === 'program';
+    const retryProgram = this.stopPhase === 'interrupted' && this.stopIntent === 'program' && this.stopPort === this.status.port;
     this.stopIntent = retryProgram || ['running', 'paused'].includes(this.workflowState) ? 'program' : 'motion';
+    this.stopPort = this.status.port;
     this.stopPhase = 'querying';
     this.update('joined', 'Stopping: waiting for controller status.');
     this.socket.emit('command', this.status.port, 'gcode:stop');
@@ -235,6 +238,7 @@ export class CncjsSession {
     this.stopTimer = null;
     this.stopPhase = 'idle';
     this.stopIntent = 'motion';
+    this.stopPort = null;
   }
 
   disconnect() {
