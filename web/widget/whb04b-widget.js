@@ -131,7 +131,7 @@ function onControllerState(type, state) {
 }
 
 function handleInput(d) {
-  controls.handleInput(d);
+  if (!document.hidden) controls.handleInput(d);
 
   // mirror to UI
   $('k1').textContent = d.firstKey; $('k2').textContent = d.secondKey;

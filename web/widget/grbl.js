@@ -144,6 +144,13 @@ export class Grbl {
     this.jogPhase = 'canceling';
     this._cmd('statusreport');
   }
+  jogPulse(axis, distance, feed) {
+    if (this.jogPhase === 'active' && this.jogGeneration === this.session.generation) {
+      if (this.activeState !== 'Idle' || this.session.reportSequence < this.jogSequence + 2 || this.session.idleReports < 2) return 'pending';
+      this.jogPhase = 'idle';
+    }
+    return this.jog(axis, distance, feed);
+  }
   jog(axis, distance, feed) {
     if (!['X', 'Y', 'Z'].includes(axis) || !Number.isFinite(distance) || Math.abs(distance) < 0.00005 || !Number.isFinite(feed) || !(feed > 0)) return this.refuse('Jog requires an XYZ axis and finite distance/feed.');
     if (this.jogGeneration !== this.session.generation) this.jogPhase = 'idle';

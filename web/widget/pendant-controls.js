@@ -35,13 +35,16 @@ export class PendantControls {
     this.axisCode = null;
     this.rateCode = null;
     this.timer = null;
+    this.pollTimer = null;
     this.lastPulse = -Infinity;
     this.direction = 0;
   }
   setConfig(config) { this.suspend(); this.config = parseConfig(config); }
   suspend() {
     if (this.timer !== null) this.cancel(this.timer);
+    if (this.pollTimer !== null) this.cancel(this.pollTimer);
     this.timer = null;
+    this.pollTimer = null;
     this.grbl.cancelJog();
     this.lastPulse = -Infinity;
     this.direction = 0;
@@ -51,6 +54,15 @@ export class PendantControls {
     this.mode = mode;
     this.log(`Mode: ${mode}.`);
     this.onMode(mode);
+  }
+  pollJog() {
+    if (this.pollTimer !== null) return;
+    this.pollTimer = this.schedule(() => {
+      this.pollTimer = null;
+      if (this.timer === null) return;
+      this.grbl._cmd('statusreport');
+      this.pollJog();
+    }, 100);
   }
   macro(number) {
     const code = this.config.macros[number]?.trim();
@@ -119,8 +131,9 @@ export class PendantControls {
     const time = this.now();
     if (time - this.lastPulse < 200) return;
     const feed = max * selection.percent / 100;
-    // At most one 200 ms travel segment per 200 ms; no unbounded motion target
-    // and no timer generates motion without another physical wheel report.
-    if (this.grbl.jog(axis, direction * feed / 60 * 0.2, feed) === 'sent') this.lastPulse = time;
+    // One bounded segment outstanding, even when acceleration makes it take
+    // longer than 200 ms. Timers query/cancel; only wheel input starts motion.
+    if (this.grbl.jogPulse(axis, direction * feed / 60 * 0.2, feed) === 'sent') this.lastPulse = time;
+    this.pollJog();
   }
 }

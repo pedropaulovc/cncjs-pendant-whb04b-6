@@ -152,3 +152,16 @@ test('completed Step releases jog ownership so changing mode does not discard th
   assert.equal(f.commands.filter(([c])=>c==='gcode').length,2);
   assert.equal(f.commands.some(([c])=>c==='jogCancel'),false);
 });
+
+test('Continuous never queues behind a slow segment and never starts motion from a timer', () => {
+  const f=fixture(); f.press(0x0e); f.input({jog:1}); f.session.activeState='Jog';
+  for(let i=0;i<20;i++) { f.timer.advance(50); f.input({jog:5}); }
+  assert.equal(f.commands.filter(([c])=>c==='gcode').length,1);
+  assert.ok(f.commands.filter(([c])=>c==='statusreport').length>=5);
+  f.session.activeState='Idle'; f.session.idleReports=2; f.session.reportSequence+=2;
+  f.timer.advance(100);
+  assert.equal(f.commands.filter(([c])=>c==='gcode').length,1);
+  f.input({jog:1});
+  assert.equal(f.commands.filter(([c])=>c==='gcode').length,2);
+  f.timer.advance(180); assert.equal(f.timer.timers.size,0);
+});

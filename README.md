@@ -145,11 +145,13 @@ only logs its slot number. Bare Reset and Stop retain their normal behavior.
   selector. The last two positions require **5/10 mm steps → Enabled**, matching
   LinuxCNC's opt-in big-step option. A step finishes after the wheel stops.
 - **Continuous:** the selector chooses 2, 5, 10, 30, 60, or 100% of the selected
-  axis's GRBL maximum rate (`$110`–`$112`). Motion is issued as at most one
-  200 ms travel segment per 200 ms; a 180 ms gap between wheel reports cancels
+  axis's GRBL maximum rate (`$110`–`$112`). Motion is issued as one outstanding
+  segment with 200 ms of travel at that feed; a 180 ms gap between wheel reports cancels
   the jog. Direction, axis, and mode changes also cancel it. New motion waits
-  for two fresh Idle reports after cancellation. Browser/serial latency and
-  GRBL deceleration add to the stopping time.
+  for two fresh Idle reports after each segment or cancellation. Status is
+  queried every 100 ms while the wheel turns. Acceleration and status latency
+  can produce pauses between segments; this bounds queued travel if the
+  connection drops. Browser/serial latency and GRBL deceleration add to stopping time.
 
 In MPG or Continuous, moving the selector also sets the feed override to its
 percentage. GRBL's 10–200% override range clamps the 2% and 5% selections to 10%
@@ -182,6 +184,7 @@ LinuxCNC's HAL machine power, hardware E-stop, joint/teleop modes, and arbitrary
 HAL pin wiring have no stock GRBL equivalents. Reset remains a software reset.
 Macro-10 changes the pendant LCD only; it does not change the CNCjs or EL400 view.
 USB removal, hiding the browser tab, and leaving the page cancel pendant jogging;
+wheel/button input is ignored while the browser tab is hidden.
 network loss can only be bounded by the already-issued finite jog segment.
 
 Stop waits for GRBL 1.1 to report a completed hold (`Hold:0`) before resetting
