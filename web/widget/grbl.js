@@ -13,6 +13,7 @@ export class Grbl {
     this.jogPositionSequence = 0;
     this.jogTimer = null;
     this.jogTarget = null;
+    this.jogCompletionNotice = 'none';
     this.spindleDirectionMode = 'M3';
   }
   get state() { return this.session.state || {}; }
@@ -151,24 +152,35 @@ export class Grbl {
   }
   jogCompleted() {
     if (this.activeState !== 'Idle') return false;
-    if (!this.jogTarget) return this.session.reportSequence >= this.jogSequence + 2 && this.session.idleReports >= 2;
+    const acknowledgedIdle = this.jogReceipt?.state === 'acknowledged'
+      && this.session.reportSequence >= this.jogReceipt.reportSequence + 2 && this.session.idleReports >= 2;
+    if (!this.jogTarget) return this.unmeasuredJogCompleted(acknowledgedIdle);
     const position = this.position(this.jogTarget.axis, this.jogTarget.kind);
     if (!position || position.kind !== this.jogTarget.kind || position.units !== this.jogTarget.units) return false;
     const tolerance = Math.max(position.resolution, this.jogTarget.resolution) + 1e-8;
     // An unchanged frame is deduplicated by CNCjs. Tiny Steps and queued Steps
-    // returning to their start still finish after two explicitly requested Idle
-    // reports, even when those reports use the other coordinate frame.
+    // returning to their start need the last command's acknowledgement followed
+    // by two fresh Idle reports: a dwell can report Idle before queued jogs run.
     if (Math.abs(this.jogTarget.value - this.jogTarget.start) <= 2 * tolerance
-      && Math.abs(position.value - this.jogTarget.value) <= 2 * tolerance
-      && this.session.reportSequence >= this.jogSequence + 2 && this.session.idleReports >= 2) return true;
+      && Math.abs(position.value - this.jogTarget.value) <= 2 * tolerance) return this.unmeasuredJogCompleted(acknowledgedIdle);
     if (position.sequence <= this.jogPositionSequence || Math.abs(position.value - this.jogTarget.start) < tolerance) return false;
     return Math.abs(position.value - this.jogTarget.value) <= tolerance;
+  }
+  unmeasuredJogCompleted(acknowledgedIdle) {
+    if (this.session.replyTracking === 'unknown' && this.jogCompletionNotice === 'none'
+      && this.session.reportSequence >= this.jogSequence + 2 && this.session.idleReports >= 2) {
+      this.jogCompletionNotice = 'shown';
+      this.log('Jog completion cannot be confirmed after joining an active controller or program activity. Jog cancellation remains armed; change mode/axis or press Stop to cancel. Reset restores acknowledgement tracking.');
+    }
+    return acknowledgedIdle;
   }
   clearJog() {
     if (this.jogTimer !== null) this.cancel(this.jogTimer);
     this.jogTimer = null;
     this.jogPhase = 'idle';
     this.jogTarget = null;
+    this.jogReceipt = null;
+    this.jogCompletionNotice = 'none';
   }
   jogSessionChanged() {
     return this.jogGeneration !== this.session.generation || this.jogEpoch !== this.session.motionEpoch;
@@ -236,8 +248,9 @@ export class Grbl {
     const pending = this.jogPhase === 'active' && !this.jogCompleted() && this.jogTarget?.axis === axis ? this.jogTarget : null;
     const position = this.position(axis, pending?.kind);
     const previous = pending || position;
-    const result = this.gcode(`$J=G21 G91 ${axis}${distance.toFixed(4)} F${Math.min(feed, max).toFixed(3)}`);
-    if (result === 'dropped') return result;
+    const receipt = this.session.jog(`$J=G21 G91 ${axis}${distance.toFixed(4)} F${Math.min(feed, max).toFixed(3)}`);
+    if (receipt.state === 'dropped') return 'dropped';
+    this.jogReceipt = receipt;
     this.jogPhase = 'active';
     this.jogGeneration = this.session.generation;
     this.jogEpoch = this.session.motionEpoch;

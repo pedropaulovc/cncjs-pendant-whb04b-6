@@ -322,6 +322,7 @@ test('port close disarms commands and resumes discovery without closing hardware
 test('jog and fixed-distance macros use mm even after a prior G20 command', () => {
   const commands = [];
   const grbl = new Grbl({ command: (...args) => commands.push(args), status: { phase: 'joined' },
+    jog: code => { commands.push(['gcode', code]); return { state: 'queued' }; },
     stopPhase: 'idle', workflowState: 'idle', activeState: 'Idle', settings: { settings: { $110: '3000' } } }, () => 12.5);
   grbl.jog('X', -0.2, 250);
   assert.deepEqual(commands.pop(), ['gcode', '$J=G21 G91 X-0.2000 F250.000']);
@@ -417,9 +418,10 @@ test('state/settings and raw status caches are isolated per controller generatio
   assert.deepEqual(f.session.overrides,[]); assert.equal(f.session.activeState,'');
 });
 
-function gatedJogFixture() {
+function gatedJogFixture(acknowledgements = 'immediate') {
   const f=fixture(); f.join();
   f.socket.receive('workflow:state','idle');
+  f.socket.receive('serialport:read','Grbl 1.1h');
   f.socket.receive('controller:settings','Grbl',{settings:{$13:'0',$110:'3000',$111:'3000',$112:'1000'}});
   const machine={state:'Idle',x:0,y:0,z:0};
   const broadcast=()=>f.socket.receive('controller:state','Grbl',{status:{activeState:machine.state,mpos:Object.fromEntries(['x','y','z'].map(axis=>[axis,machine[axis].toFixed(3)]))}});
@@ -429,6 +431,10 @@ function gatedJogFixture() {
   const emit=f.socket.emit.bind(f.socket);
   f.socket.emit=(...args)=>{
     emit(...args);
+    if(acknowledgements==='immediate' && args[0]==='command' && args[2]==='gcode') {
+      f.socket.receive('serialport:write',`${args[3]}\n`,{...args[4],source:'feeder'});
+      f.socket.receive('serialport:read','ok');
+    }
     // Match CNCjs: its automatic status polls never forward serialport:read.
     if(args[0]==='command' && args[2]==='statusreport') f.socket.receive('serialport:read',`<${machine.state}|MPos:${machine.x.toFixed(3)},${machine.y.toFixed(3)},${machine.z.toFixed(3)}|FS:0,0>`);
     return f.socket;
@@ -484,9 +490,10 @@ for(const event of ['disconnect','reset','stop']) test(`jog poller is discarded 
 test('external controller reset discards the jog target without changing the Stop generation',()=>{
   const f=gatedJogFixture(); f.grbl.jog('X',1,250);
   const generation=f.session.generation;
+  const epoch=f.session.motionEpoch;
   f.socket.receive('serialport:read','Grbl 1.1h [\'$\' for help]');
   assert.equal(f.session.generation,generation);
-  assert.equal(f.session.motionEpoch,1);
+  assert.equal(f.session.motionEpoch,epoch+1);
   f.tick(); assert.equal(f.jobs.size,0); assert.equal(f.grbl.jogPhase,'idle');
   assert.equal(f.session.positionReport,null);
   f.broadcast();
@@ -499,6 +506,133 @@ test('a Step below physical/report resolution completes after two requested Idle
   f.grbl.jog('X',0.001,250);
   f.tick(); f.tick(); f.tick();
   assert.equal(f.jobs.size,0); assert.equal(f.grbl.jogPhase,'idle');
+});
+
+test('queued out-and-back Steps require the final jog ACK and two later Idle reports',()=>{
+  const f=gatedJogFixture('delayed');
+  f.socket.receive('serialport:write','G4 P2\n',{source:'feeder'});
+  f.grbl.jog('X',0.04,250); f.grbl.jog('X',-0.04,250);
+  const commands=stopCommands(f).filter(([name])=>name==='gcode');
+  f.tick(); f.tick(); f.tick();
+  assert.equal(f.grbl.jogCompleted(),false);
+  assert.equal(f.grbl.jogPhase,'active');
+  f.socket.receive('serialport:read','ok'); // Earlier dwell, not a jog.
+  for(const [,code,context] of commands) f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
+  f.socket.receive('serialport:read','ok');
+  f.tick(); f.tick();
+  assert.equal(f.grbl.jogCompleted(),false,'The first jog ACK cannot acknowledge the second');
+  f.socket.receive('serialport:read','ok');
+  assert.equal(f.grbl.jogCompleted(),false,'Old Idle reports cannot complete an acknowledged jog');
+  f.tick(); assert.equal(f.grbl.jogCompleted(),false);
+  f.tick(); assert.equal(f.grbl.jogCompleted(),true);
+  f.tick(); assert.equal(f.jobs.size,0);
+});
+
+test('mode cancellation remains armed while net-zero Steps are still queued',()=>{
+  const f=gatedJogFixture('delayed');
+  f.grbl.jog('X',0.04,250); f.grbl.jog('X',-0.04,250);
+  f.tick(); f.tick(); f.tick();
+  f.grbl.cancelJog();
+  assert.ok(stopCommands(f).some(([name])=>name==='feeder:stop'));
+  assert.ok(stopCommands(f).some(([name])=>name==='jogCancel'));
+  assert.equal(f.session.jogReceipts.size,0);
+  f.tick(); f.tick();
+  assert.equal(f.grbl.jogPhase,'idle');
+});
+
+test('unrelated MDI and manual parser-query replies cannot acknowledge a pendant jog',()=>{
+  const f=gatedJogFixture('delayed');
+  f.socket.receive('serialport:write','G21\n',{source:'client'});
+  f.socket.receive('serialport:write','$G\n',{source:'client'});
+  f.grbl.jog('X',0.001,250);
+  const [,code,context]=stopCommands(f).findLast(([name])=>name==='gcode');
+  f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
+  f.socket.receive('serialport:read','ok');
+  f.socket.receive('serialport:read','[GC:G0 G54 G17 G21 G90 G94 M5 M9 T0 F0 S0]');
+  f.socket.receive('serialport:read','ok');
+  f.tick(); f.tick();
+  assert.equal(f.grbl.jogReceipt.state,'written');
+  assert.equal(f.grbl.jogCompleted(),false);
+  f.socket.receive('serialport:read','ok');
+  f.tick(); f.tick();
+  assert.equal(f.grbl.jogCompleted(),true);
+  f.grbl.clearJog();
+});
+
+test('feeder parser-query writes do not consume a later jog ACK',()=>{
+  const f=gatedJogFixture('delayed');
+  // CNCjs suppresses both the parser response and its ACK for a feeder $G.
+  f.socket.receive('serialport:write','$G\n',{source:'feeder'});
+  f.grbl.jog('X',0.001,250);
+  const [,code,context]=stopCommands(f).findLast(([name])=>name==='gcode');
+  f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
+  f.socket.receive('serialport:read','ok');
+  assert.equal(f.grbl.jogReceipt.state,'acknowledged');
+  f.grbl.clearJog();
+});
+
+test('joining mid-flight cannot mistake an unseen old ACK for tiny-Step completion',()=>{
+  const f=gatedJogFixture('delayed');
+  f.session.clear(); f.join(); f.socket.receive('workflow:state','idle');
+  f.socket.receive('controller:settings','Grbl',{settings:{$13:'0',$110:'3000'}});
+  f.broadcast();
+  assert.equal(f.session.replyTracking,'unknown');
+  f.grbl.jog('X',0.001,250);
+  const [,code,context]=stopCommands(f).findLast(([name])=>name==='gcode');
+  f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
+  f.socket.receive('serialport:read','ok'); // Could belong to a pre-join dwell.
+  f.tick(); f.tick(); f.tick(); f.tick();
+  assert.equal(f.grbl.jogCompleted(),false);
+  assert.equal(f.grbl.jogPhase,'active');
+  assert.equal(f.logs.filter(line=>line.includes('cannot be confirmed')).length,1);
+  f.grbl.cancelJog();
+  assert.ok(stopCommands(f).some(([name])=>name==='jogCancel'));
+  f.grbl.clearJog();
+});
+
+test('reset and program activity invalidate outstanding jog receipts',()=>{
+  const f=gatedJogFixture('delayed');
+  f.grbl.jog('X',0.001,250);
+  const receipt=f.grbl.jogReceipt;
+  f.socket.receive('workflow:state','running');
+  assert.equal(receipt.state,'discarded');
+  assert.equal(f.session.replyTracking,'unknown');
+  f.socket.receive('workflow:state','idle');
+  assert.equal(f.session.replyTracking,'unknown');
+  f.socket.receive('serialport:read','Grbl 1.1h');
+  assert.equal(f.session.replyTracking,'synchronized');
+  f.grbl.clearJog();
+});
+
+test('unanswered serial writes have bounded bookkeeping and lose correlation conservatively',()=>{
+  const f=gatedJogFixture('delayed');
+  f.grbl.jog('X',0.001,250);
+  const receipt=f.grbl.jogReceipt;
+  for(let n=0;n<300;n++) f.socket.receive('serialport:write','G21\n',{source:'client'});
+  assert.ok(f.session.serialReplies.length<=256);
+  assert.equal(f.session.replyTracking,'unknown');
+  assert.equal(receipt.state,'discarded');
+  f.grbl.clearJog();
+});
+
+test('unwritten jog receipts are bounded without emitting an untracked command',()=>{
+  const f=gatedJogFixture('delayed');
+  for(let n=0;n<256;n++) assert.equal(f.session.jog('$J=G21 G91 X0.001 F250').state,'queued');
+  const count=stopCommands(f).length;
+  assert.equal(f.session.jog('$J=G21 G91 X0.001 F250').state,'dropped');
+  assert.equal(stopCommands(f).length,count);
+  assert.equal(f.session.jogReceipts.size,256);
+});
+
+test('raw partial writes invalidate ACK correlation while realtime bytes do not',()=>{
+  const f=gatedJogFixture('delayed');
+  f.socket.receive('serialport:write','?\x85!',{source:'client'});
+  assert.equal(f.session.replyTracking,'synchronized');
+  f.socket.receive('serialport:write','G4 P2',{source:'client'});
+  assert.equal(f.session.replyTracking,'unknown');
+  f.socket.receive('serialport:read','Grbl 1.1h');
+  f.socket.receive('serialport:write','G21\r',{source:'client'});
+  assert.equal(f.session.replyTracking,'unknown');
 });
 
 // These dual-frame values were verified against CNCjs 1.11.5 GrblRunner:

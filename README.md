@@ -178,6 +178,15 @@ controller settings instead of guessing a machine speed.
 If GRBL reports an error while the pendant owns a jog, the widget logs the error,
 cancels queued jogging, and waits for two Idle reports before accepting another jog.
 
+Tiny Steps and out-and-back Steps can end at the same reported position. Their
+completion requires the jog acknowledgement followed by two fresh Idle reports.
+When joining an already-open controller, CNCjs does not identify replies to
+commands sent before the widget joined. The widget then logs that completion
+cannot be confirmed and keeps jog cancellation armed. Changing mode/axis or
+pressing Stop cancels those jogs; a controller reset restores acknowledgement
+tracking. Program activity also invalidates this tracking. Ordinary Steps with
+a fresh, visibly changed endpoint still complete normally.
+
 Only XYZ axes are supported by stock GRBL; A/B/C and Off do not jog. Macros,
 homing, spindle G-code, and coolant G-code require an idle controller with no
 running program. Feed/spindle realtime overrides remain usable during a program.
