@@ -15,11 +15,7 @@ export class Grbl {
   gcode(g) { this._cmd('gcode', g); }
   reset() { this._cmd('reset'); }
   stop() {
-    this._cmd('gcode:stop', { force: true });
-    this._cmd('feeder:stop');
-    this._cmd('jogCancel');
-    // Refresh CNCjs's cached state before its forced-stop reset checks for Hold.
-    this._cmd('statusreport');
+    this.session.stop();
   }
   cyclestart() { this._cmd('cyclestart'); }
   homing() { this._cmd('homing'); }

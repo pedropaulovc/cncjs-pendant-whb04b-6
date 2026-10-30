@@ -96,8 +96,8 @@ the live key/dial/jog readout and push coordinates to the LCD.
 
 | Button | Function |
 |--------|----------|
-| Reset | Emergency reset |
-| Stop | Cancel jogs and queued commands; force-stop a running program (hold, then reset) |
+| Reset | Controller soft reset |
+| Stop | Cancel jogs and queued commands; hold a running program, then reset after motion stops |
 | Start/Pause | Cycle start |
 | M-Home | Homing |
 | Safe-Z | Move to safe Z height |
@@ -108,6 +108,13 @@ the live key/dial/jog readout and push coordinates to the LCD.
 
 The left dial selects the axis (X/Y/Z/A/B/C), the right dial selects the step
 size and feed rate, and the wheel jogs.
+
+Stop waits for GRBL 1.1 to report a completed hold (`Hold:0`) before resetting
+programmed motion. It leaves an idle controller idle. Pendant motion commands
+stay blocked until the controller confirms the stop; inspect CNCjs if status
+updates stop arriving. Reset remains available. Follow the controller's
+unlock/homing procedure after a reset. These software controls depend on the
+browser and serial connection and do not replace a wired emergency stop.
 
 ## How it works
 

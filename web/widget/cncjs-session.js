@@ -4,6 +4,8 @@ export class CncjsSession {
     Object.assign(this, { io, origin, onStatus, onState, schedule, cancel });
     this.socket = null;
     this.timer = null;
+    this.stopTimer = null;
+    this.stopPhase = 'idle';
     this.selection = 'automatic';
     this.selectedPort = null;
     this.generation = 0;
@@ -18,6 +20,7 @@ export class CncjsSession {
   }
 
   clear() {
+    this.finishStop();
     this.generation += 1;
     this.pendingPort = null;
     this.status.port = null;
@@ -60,8 +63,12 @@ export class CncjsSession {
       this.clear();
       this.update('disconnected');
     });
-    on('connect_error', (error) => this.update('disconnected', String(error.message || error)));
-    on('error', (error) => this.update('disconnected', String(error.message || error)));
+    const connectionError = error => {
+      this.clear();
+      this.update('disconnected', String(error.message || error));
+    };
+    on('connect_error', connectionError);
+    on('error', connectionError);
     on('serialport:change', () => this.discover());
     on('serialport:close', () => {
       this.clear();
@@ -75,6 +82,7 @@ export class CncjsSession {
     on('controller:state', (type, state) => {
       if (type === 'Grbl') this.onState(type, state);
     });
+    on('serialport:read', line => this.stopReport(line));
     on('serialport:list', (ports) => this.join(ports));
     this.timer = this.schedule(() => this.discover(), 2000);
   }
@@ -118,7 +126,75 @@ export class CncjsSession {
       this.update(this.status.phase, 'Command dropped: no joined GRBL controller.');
       return;
     }
+    if (this.stopPhase !== 'idle' && !['reset', 'statusreport'].includes(directive)) {
+      this.update('joined', 'Command dropped: Stop is waiting for the controller.');
+      return;
+    }
+    if (this.stopPhase !== 'idle' && directive === 'reset') this.stopPhase = 'resetting';
     this.socket.emit('command', this.status.port, directive, data);
+  }
+
+  stop() {
+    if (!this.socket?.connected || this.status.phase !== 'joined') return;
+    if (this.stopPhase !== 'idle') return;
+    this.stopPhase = 'querying';
+    this.update('joined', 'Stopping: waiting for controller status.');
+    this.socket.emit('command', this.status.port, 'gcode:stop');
+    this.socket.emit('command', this.status.port, 'feeder:stop');
+    this.socket.emit('command', this.status.port, 'jogCancel');
+    this.command('statusreport');
+    // CNCjs's forced stop uses a cached state and a fixed 500 ms reset delay.
+    // Explicit reports retain GRBL's Hold substate; never reset during Hold:1.
+    const generation = this.generation;
+    this.stopTimer = this.schedule(() => {
+      if (generation === this.generation && this.stopPhase !== 'idle') this.command('statusreport');
+    }, 250);
+  }
+
+  stopReport(line) {
+    if (this.stopPhase === 'idle' || this.status.phase !== 'joined') return;
+    if (typeof line !== 'string') return;
+    if (this.stopPhase === 'resetting') {
+      if (!line.startsWith('Grbl ')) return;
+      this.stopPhase = 'confirming';
+      this.command('statusreport');
+      return;
+    }
+    const state = /^<([^|>]+)/.exec(line)?.[1];
+    if (!state) return;
+    // A previous explicit status query can already be in flight at Stop.
+    // Require another Idle report before releasing the motion interlock.
+    if (state === 'Idle' && this.stopPhase !== 'idle-confirmation') {
+      this.stopPhase = 'idle-confirmation';
+      return;
+    }
+    if (state === 'Idle' || state === 'Alarm') {
+      this.finishStop();
+      this.update('joined', state === 'Alarm' ? 'Stop completed with controller alarm; inspect CNCjs.' : '');
+      return;
+    }
+    if (state === 'Hold:0') {
+      this.stopPhase = 'resetting';
+      this.command('reset');
+      return;
+    }
+    if (state === 'Hold:1') {
+      this.stopPhase = 'holding';
+      return;
+    }
+    if (state !== 'Run' && state !== 'Jog') {
+      this.update('joined', `Stop waiting for controller (${state}); inspect CNCjs.`);
+      return;
+    }
+    this.stopPhase = 'holding';
+    this.socket.emit('command', this.status.port, state === 'Jog' ? 'jogCancel' : 'feedhold');
+    this.command('statusreport');
+  }
+
+  finishStop() {
+    if (this.stopTimer !== null) this.cancel(this.stopTimer);
+    this.stopTimer = null;
+    this.stopPhase = 'idle';
   }
 
   disconnect() {

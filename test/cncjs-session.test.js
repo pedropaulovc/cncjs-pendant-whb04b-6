@@ -60,12 +60,76 @@ function fixture() {
   return { session, socket, sockets, timers, emitted, states, list, join };
 }
 
-test('Stop uses CNCjs forced program stop and jog cancel without holding an idle machine', () => {
-  const commands = [];
-  new Grbl({ command: (...args) => commands.push(args) }).stop();
-  assert.deepEqual(commands, [['gcode:stop', { force: true }], ['feeder:stop', undefined], ['jogCancel', undefined], ['statusreport', undefined]]);
+function stopCommands(f) {
+  return f.emitted.filter(([event]) => event === 'command').map(([, , ...args]) => args);
+}
+
+function report(f, state) {
+  f.socket.receive('serialport:read', `<${state}|MPos:0,0,0|FS:0,0>`);
+}
+
+test('Stop delegates cancellation to the joined session', () => {
+  let stops = 0;
+  new Grbl({ stop() { stops++; } }).stop();
+  assert.equal(stops, 1);
 });
 
+test('Stop at Idle clears queues and confirms Idle without hold or reset', () => {
+  const f = fixture(); f.join(); f.session.stop();
+  assert.deepEqual(stopCommands(f).map(([name]) => name), ['gcode:stop', 'feeder:stop', 'jogCancel', 'statusreport']);
+  report(f, 'Idle');
+  assert.notEqual(f.session.stopPhase, 'idle', 'One potentially stale reply cannot release the interlock');
+  report(f, 'Idle');
+  assert.equal(f.session.stopPhase, 'idle');
+  assert.equal(f.timers.size, 1);
+});
+
+test('Stop uses fresh reports despite cached Idle, waits through Hold:1, then resets once', () => {
+  const f = fixture(); f.join();
+  f.socket.receive('controller:state', 'Grbl', { status: { activeState: 'Idle' } });
+  f.session.stop();
+  report(f, 'Idle'); // A prior status query may still be in flight.
+  report(f, 'Run');
+  assert.equal(stopCommands(f).at(-2)[0], 'feedhold');
+  report(f, 'Hold:1');
+  for (let tick = 0; tick < 20; tick++) for (const timer of f.timers) timer();
+  assert.equal(stopCommands(f).some(([name]) => name === 'reset'), false);
+  report(f, 'Hold:0');
+  report(f, 'Hold:0');
+  assert.equal(stopCommands(f).filter(([name]) => name === 'reset').length, 1);
+  report(f, 'Idle');
+  assert.equal(f.session.stopPhase, 'resetting', 'Wait for startup before accepting Idle');
+  f.socket.receive('serialport:read', "Grbl 1.1h ['$' for help]");
+  report(f, 'Idle'); report(f, 'Idle');
+  assert.equal(f.session.stopPhase, 'idle');
+  assert.equal(f.timers.size, 1);
+});
+
+test('Stop cancels jogging without resetting and blocks motion while pending', () => {
+  const f = fixture(); f.join(); f.session.stop();
+  f.session.stop();
+  const count = stopCommands(f).length;
+  f.session.command('cyclestart'); f.session.command('gcode', '$J=G91 X1 F50');
+  assert.equal(stopCommands(f).length, count);
+  report(f, 'Jog');
+  assert.equal(stopCommands(f).at(-2)[0], 'jogCancel');
+  report(f, 'Idle'); report(f, 'Idle');
+  assert.equal(stopCommands(f).some(([name]) => name === 'reset' || name === 'feedhold'), false);
+  f.session.command('cyclestart');
+  assert.equal(stopCommands(f).at(-1)[0], 'cyclestart');
+});
+
+for (const action of ['disconnect', 'selectPort']) test(`Stop abandons pending actions on ${action}`, () => {
+  const f = fixture(); f.join(); f.session.stop();
+  report(f, 'Run');
+  f.session[action]('COM2');
+  const count = stopCommands(f).length;
+  report(f, 'Hold:0');
+  for (const timer of f.timers) timer();
+  assert.equal(stopCommands(f).length, count);
+  assert.equal(f.session.stopPhase, 'idle');
+  assert.equal(f.session.stopTimer, null);
+});
 test('joins an active port and delivers initial and subsequent state', () => {
   const f = fixture();
   assert.equal(f.emitted[0][0], 'list');
@@ -174,4 +238,21 @@ test('jog and fixed-distance macros use mm even after a prior G20 command', () =
   grbl.probeZ();
   assert.equal(commands[0][1], 'G21 G91');
   assert.equal(commands[2][1], 'G10 L20 P1 Z12.501');
+});
+
+test('a canceled poll callback cannot send commands to a new port', () => {
+  const f = fixture(); f.join(); f.session.stop();
+  const oldPoll = f.session.stopTimer;
+  f.session.selectPort('COM2'); f.join('COM2');
+  const count = stopCommands(f).length;
+  oldPoll(); report(f, 'Hold:0');
+  assert.equal(stopCommands(f).length, count);
+});
+
+for (const event of ['error', 'connect_error', 'serialport:close']) test(`Stop clears its poll on ${event}`, () => {
+  const f = fixture(); f.join(); f.session.stop();
+  f.socket.receive(event, new Error('connection lost'));
+  assert.equal(f.session.stopPhase, 'idle');
+  assert.equal(f.session.stopTimer, null);
+  assert.equal(f.timers.size, 1);
 });
