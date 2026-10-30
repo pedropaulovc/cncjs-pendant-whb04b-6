@@ -112,6 +112,33 @@ test('feature-report errors propagate without an unsupported output-report fallb
   await assert.rejects(pendant.sendDisplayData(buildDisplayFrame()), /feature failed/);
 });
 
+test('disconnect and reconnect never continue old frames on the new connection', async () => {
+  const pendant = new WHB04BWebHID();
+  let release;
+  const reports = [];
+  const device = {
+    removeEventListener() {},
+    async sendFeatureReport(id, bytes) {
+      reports.push([...bytes]);
+      if (reports.length === 1) await new Promise(resolve => { release = resolve; });
+    },
+  };
+  pendant.connected = true;
+  pendant.device = device;
+  const first = assert.rejects(pendant.sendDisplayData(buildDisplayFrame({ x: 1 })), /disconnected/);
+  const queued = assert.rejects(pendant.sendDisplayData(buildDisplayFrame({ x: 2 })), /disconnected/);
+  pendant._teardown(false);
+  // The browser can return the same HIDDevice object on reconnection.
+  pendant.device = device;
+  pendant.connected = true;
+  release();
+  await Promise.all([first, queued]);
+  assert.equal(reports.length, 1);
+  await pendant.sendDisplayData(buildDisplayFrame({ x: 3 }));
+  assert.equal(reports.length, 4);
+  assert.equal(reports[1][4], 3);
+});
+
 test('a stalled feature report times out, closes the connection and rejects queued frames', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const pendant = new WHB04BWebHID();

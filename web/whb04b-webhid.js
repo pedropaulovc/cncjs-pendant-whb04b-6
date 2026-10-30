@@ -84,6 +84,7 @@ export class WHB04BWebHID extends EventTarget {
     // Finish the active frame, then send only the latest pending snapshot.
     this._pendingDisplay = null;
     this._displayWriter = null;
+    this._displayEpoch = 0;
     // React to physical plug/unplug of the already-authorised device.
     this._onConnect = (e) => { if (this._matches(e.device) && !this.connected) this._attach(e.device).catch(() => {}); };
     this._onDisconnect = (e) => { if (e.device === this.device) this._teardown(true); };
@@ -121,6 +122,7 @@ export class WHB04BWebHID extends EventTarget {
   }
 
   async _attach(device) {
+    this._displayEpoch++;
     this.device = device;
     if (!device.opened) await device.open();
     device.addEventListener('inputreport', this._onInput);
@@ -132,6 +134,7 @@ export class WHB04BWebHID extends EventTarget {
   // disconnect or destroy); keeps the navigator.hid listeners so a later
   // re-plug of an authorised device auto-attaches.
   _teardown(emit) {
+    this._displayEpoch++;
     if (this.device) {
       try { this.device.removeEventListener('inputreport', this._onInput); } catch { /* ignore */ }
       this.device = null;
@@ -158,17 +161,17 @@ export class WHB04BWebHID extends EventTarget {
     return new Promise((resolve, reject) => {
       const waiters = this._pendingDisplay?.waiters || [];
       waiters.push({ resolve, reject });
-      this._pendingDisplay = { frame: frame.slice(), waiters };
+      this._pendingDisplay = { frame: frame.slice(), waiters, epoch: this._displayEpoch };
       if (!this._displayWriter) this._displayWriter = this._drainDisplay();
     });
   }
 
   async _drainDisplay() {
     while (this._pendingDisplay) {
-      const { frame, waiters } = this._pendingDisplay;
+      const { frame, waiters, epoch } = this._pendingDisplay;
       this._pendingDisplay = null;
       try {
-        await this._writeFrame(frame);
+        await this._writeFrame(frame, epoch);
         for (const waiter of waiters) waiter.resolve();
       } catch (error) {
         for (const waiter of waiters) waiter.reject(error);
@@ -177,11 +180,11 @@ export class WHB04BWebHID extends EventTarget {
     this._displayWriter = null;
   }
 
-  async _writeFrame(frame) {
+  async _writeFrame(frame, epoch) {
     if (!this.device || !this.connected) throw new Error('Device not connected.');
     const device = this.device;
     for (let i = 0; i < OUTPUT_PAYLOAD_SIZE; i += OUTPUT_CHUNK) {
-      if (device !== this.device || !this.connected) throw new Error('Device disconnected during LCD update.');
+      if (epoch !== this._displayEpoch || device !== this.device || !this.connected) throw new Error('Device disconnected during LCD update.');
       const chunk = new Uint8Array(OUTPUT_CHUNK);
       chunk.set(frame.subarray(i, i + OUTPUT_CHUNK));
       let timer;
@@ -191,8 +194,10 @@ export class WHB04BWebHID extends EventTarget {
           new Promise((_, reject) => {
             timer = setTimeout(() => {
               // Stop this connection before any further chunks can be sent.
-              if (device === this.device) this._teardown(true);
-              Promise.resolve().then(() => device.close()).catch(() => {});
+              if (epoch === this._displayEpoch && device === this.device) {
+                this._teardown(true);
+                Promise.resolve().then(() => device.close()).catch(() => {});
+              }
               reject(new Error('Pendant LCD feature report timed out; reconnect the pendant.'));
             }, 1000);
           }),
