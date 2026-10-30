@@ -13,6 +13,7 @@ export class MacroSettings {
     Object.assign(this, { container, status, refreshButton, onRefresh, onChange });
     this.document = container.ownerDocument;
     this.catalog = new Map();
+    this.macroNames = new Map();
     this.catalogState = 'unloaded';
     this.rows = new Map();
     container.replaceChildren();
@@ -83,8 +84,10 @@ export class MacroSettings {
     }
     const id = selection.startsWith('cncjs:') ? selection.slice(6) : null;
     if (id !== null && !this.catalog.has(id)) {
-      const label = this.catalogState === 'ready' ? 'Unavailable CNCjs macro' : 'CNCjs macro awaiting refresh';
-      options.push(this.option(selection, `${label} (${id})`));
+      const name = this.macroNames.get(id);
+      const suffix = this.catalogState === 'ready' ? 'unavailable' : 'awaiting refresh';
+      const fallback = this.catalogState === 'ready' ? 'Unavailable saved macro' : 'Saved macro awaiting refresh';
+      options.push(this.option(selection, name ? `${name} (${suffix})` : fallback));
     }
     row.select.replaceChildren(...options);
     row.select.value = selection;
@@ -114,6 +117,9 @@ export class MacroSettings {
   setAssignments(assignments) {
     for (const [slot, row] of this.rows) {
       const assignment = assignments?.[slot];
+      if (assignment?.source === 'cncjs' && typeof assignment.name === 'string' && !this.catalog.has(assignment.id)) {
+        this.macroNames.set(assignment.id, assignment.name);
+      }
       row.code.value = typeof assignment === 'string' ? assignment : '';
       const selection = typeof assignment === 'string' && assignment.trim() ? 'custom'
         : assignment?.source === 'cncjs' ? `cncjs:${assignment.id}` : 'disabled';
@@ -125,13 +131,18 @@ export class MacroSettings {
     const assignments = {};
     for (const [slot, { select, code }] of this.rows) {
       if (select.value === 'custom' && code.value.trim()) assignments[slot] = code.value;
-      if (select.value.startsWith('cncjs:')) assignments[slot] = { source: 'cncjs', id: select.value.slice(6) };
+      if (select.value.startsWith('cncjs:')) {
+        const id = select.value.slice(6);
+        assignments[slot] = { source: 'cncjs', id };
+        if (this.macroNames.has(id)) assignments[slot].name = this.macroNames.get(id);
+      }
     }
     return assignments;
   }
 
   setCatalog(records) {
     this.catalog = new Map(records.map(record => [record.id, record]));
+    for (const record of records) this.macroNames.set(record.id, record.name || '(Unnamed macro)');
     this.catalogState = 'ready';
     for (const row of this.rows.values()) this.updateOptions(row);
   }
