@@ -17,10 +17,21 @@ export class CncjsSession {
     this.overrideSequence = 0;
     this.overrides = [];
     this.positionReport = null;
+    this.positionReports = {};
     this.positionSequence = 0;
-    this.statePositionSignature = '';
+    this.statePositionSignatures = {};
     this.motionState = '';
     this.motionEpoch = 0;
+    this.workflowEpoch = 0;
+    this.errorSequence = 0;
+    this.controllerError = null;
+    this.jogReceipts = new Map();
+    this.serialReplies = [];
+    this.jogId = 0;
+    this.jogOwner = crypto.randomUUID();
+    this.latestJog = null;
+    this.parserReply = 'none';
+    this.replyTracking = 'unknown';
     this.activeState = '';
     this.selection = 'automatic';
     this.selectedPort = null;
@@ -36,6 +47,11 @@ export class CncjsSession {
   }
 
   clear() {
+    this.clearJogReceipts();
+    this.latestJog = null;
+    this.serialReplies = [];
+    this.parserReply = 'none';
+    this.replyTracking = 'unknown';
     this.cancelStopPolling();
     if (this.stopPhase !== 'idle') this.stopPhase = 'interrupted';
     this.workflowState = 'unknown';
@@ -44,8 +60,10 @@ export class CncjsSession {
     this.activeState = '';
     this.overrides = [];
     this.positionReport = null;
-    this.statePositionSignature = '';
+    this.positionReports = {};
+    this.statePositionSignatures = {};
     this.motionState = '';
+    this.controllerError = null;
     this.idleReports = 0;
     this.generation += 1;
     this.pendingPort = null;
@@ -109,12 +127,11 @@ export class CncjsSession {
       if (type !== 'Grbl') return;
       this.state = state;
       const status = state?.status || {};
-      const kind = status.mpos ? 'MPos' : 'WPos';
-      const position = status.mpos || status.wpos;
-      const words = ['x', 'y', 'z'].map(axis => position?.[axis]);
-      const signature = JSON.stringify([status.activeState, ...words]);
-      if (signature !== this.statePositionSignature && words.every(value => value !== undefined)) {
-        this.statePositionSignature = signature;
+      for (const [kind, position] of [['MPos', status.mpos], ['WPos', status.wpos]]) {
+        const words = ['x', 'y', 'z'].map(axis => position?.[axis]);
+        const signature = JSON.stringify([status.activeState, ...words]);
+        if (signature === this.statePositionSignatures[kind] || words.some(value => value === undefined)) continue;
+        this.statePositionSignatures[kind] = signature;
         this.recordPosition(kind, words.map(String), status.activeState);
       }
       if (Array.isArray(state?.status?.ov) && state.status.ov.length === 3) this.overrides = state.status.ov.map(Number);
@@ -124,17 +141,40 @@ export class CncjsSession {
       if (type === 'Grbl') this.settings = settings;
     });
     on('workflow:state', state => {
-      if ((this.pendingPort || this.status.port) && ['idle', 'running', 'paused'].includes(state)) this.workflowState = state;
+      if (!(this.pendingPort || this.status.port) || !['idle', 'running', 'paused'].includes(state)) return;
+      const previous = this.workflowState;
+      this.workflowState = state;
+      if (state !== 'idle') {
+        if (state !== previous) this.workflowEpoch += 1;
+        // CNCjs consumes program acknowledgements internally. If the program is
+        // stopped, remaining replies can become visible again without writes.
+        this.clearJogReceipts();
+        this.latestJog = null;
+        this.serialReplies = [];
+        this.replyTracking = 'unknown';
+      }
     });
+    on('serialport:write', (data, context = {}) => this.recordWrite(data, context));
     on('serialport:read', line => {
+      this.recordReply(line);
+      if (typeof line === 'string' && /^error:\d+(?:\s|$)/.test(line)) {
+        this.controllerError = { sequence: ++this.errorSequence, line };
+      }
       if (typeof line === 'string' && line.startsWith('Grbl ')) {
+        this.clearJogReceipts();
+        this.latestJog = null;
+        this.serialReplies = [];
+        this.parserReply = 'none';
+        this.replyTracking = this.workflowState === 'idle' ? 'synchronized' : 'unknown';
         this.motionEpoch += 1;
         this.motionState = '';
         this.activeState = '';
         this.positionReport = null;
+        this.positionReports = {};
         this.overrides = [];
-        this.statePositionSignature = '';
+        this.statePositionSignatures = {};
         this.state = {};
+        this.controllerError = null;
       }
       const state = typeof line === 'string' ? /^<([^|>]+)/.exec(line)?.[1] : null;
       if (state) {
@@ -163,6 +203,7 @@ export class CncjsSession {
     this.positionReport = { kind, values, sequence: ++this.positionSequence,
       units: this.settings.settings?.$13,
       resolution: Math.max(...words.map(word => 10 ** -(word.split('.')[1]?.length || 0))) };
+    this.positionReports[kind] = this.positionReport;
   }
 
   join(ports) {
@@ -204,7 +245,71 @@ export class CncjsSession {
     });
   }
 
-  command(directive, data) {
+  jog(code) {
+    if (this.jogReceipts.size >= 256) {
+      this.update(this.status.phase, 'Jog dropped: too many commands awaiting controller acknowledgement; cancel jogging before continuing.');
+      return { state: 'dropped', reportSequence: null };
+    }
+    const id = `${this.jogOwner}:${this.generation}:${++this.jogId}`;
+    const receipt = { state: 'queued', transmission: 'queued', reportSequence: null };
+    this.latestJog = { id, receipt };
+    this.jogReceipts.set(id, receipt);
+    if (this.command('gcode', code, { pendantJog: id }) === 'dropped') {
+      this.jogReceipts.delete(id);
+      receipt.state = 'dropped';
+    }
+    return receipt;
+  }
+
+  clearJogReceipts() {
+    for (const receipt of this.jogReceipts.values()) receipt.state = 'discarded';
+    this.jogReceipts.clear();
+  }
+
+  recordWrite(data, context) {
+    if (typeof data !== 'string' || this.workflowState !== 'idle') return;
+    const commands = data.replace(/[?!~\x18\x80-\xff]/g, '');
+    if (data.includes('\x18') || (commands && (!commands.endsWith('\n') || commands.includes('\r')))) {
+      // Arbitrary raw/partial serial writes are not CNCjs's complete-line
+      // feeder protocol; do not guess which later ACK belongs to which line.
+      this.clearJogReceipts();
+      this.serialReplies = [];
+      this.replyTracking = 'unknown';
+      return;
+    }
+    for (const line of commands.split('\n').slice(0, -1)) {
+      const command = line.trim();
+      // CNCjs consumes $G acknowledgements separately from the feeder. Its
+      // automatic queries are not broadcast as writes at all.
+      if (command.toUpperCase().replace(/\s/g, '') === '$G') continue;
+      // Bound bookkeeping if a controller stops replying. Losing correlation
+      // must retain jog ownership rather than manufacture an acknowledgement.
+      if (this.serialReplies.length >= 256) {
+        this.clearJogReceipts();
+        this.serialReplies = [];
+        this.replyTracking = 'unknown';
+      }
+      const receipt = this.jogReceipts.get(context.pendantJog);
+      if (this.latestJog && this.latestJog.id === context.pendantJog) this.latestJog.receipt.transmission = 'written';
+      if (receipt) { receipt.state = 'written'; receipt.transmission = 'written'; }
+      this.serialReplies.push({ id: context.pendantJog, receipt });
+    }
+  }
+
+  recordReply(line) {
+    if (typeof line !== 'string') return;
+    if (line.startsWith('[GC:')) { this.parserReply = 'pending'; return; }
+    if (!/^ok\s*$/.test(line) && !/^error:\d+(?:\s|$)/.test(line)) return;
+    if (this.parserReply === 'pending') { this.parserReply = 'none'; return; }
+    const pending = this.serialReplies.shift();
+    if (!pending?.receipt || pending.receipt.state !== 'written') return;
+    pending.receipt.state = line.trim() !== 'ok' ? 'rejected'
+      : this.replyTracking === 'synchronized' ? 'acknowledged' : 'uncertain';
+    pending.receipt.reportSequence = this.reportSequence;
+    this.jogReceipts.delete(pending.id);
+  }
+
+  command(directive, data, context) {
     if (!this.socket?.connected || this.status.phase !== 'joined') {
       this.update(this.status.phase, 'Command dropped: no joined GRBL controller.');
       return 'dropped';
@@ -222,7 +327,10 @@ export class CncjsSession {
       this.update('joined', 'Stopping: waiting for controller reset.');
       this.startStopPolling();
     }
-    this.socket.emit('command', this.status.port, directive, data);
+    if (directive === 'feeder:stop' || directive === 'reset') this.clearJogReceipts();
+    if (directive === 'reset') this.replyTracking = 'unknown';
+    if (context) this.socket.emit('command', this.status.port, directive, data, context);
+    if (!context) this.socket.emit('command', this.status.port, directive, data);
     return 'sent';
   }
 
@@ -232,6 +340,7 @@ export class CncjsSession {
       return;
     }
     if (!['idle', 'interrupted'].includes(this.stopPhase)) return;
+    this.clearJogReceipts();
     // A dwell reports Idle while the sender is still running. Preserve this
     // intent before gcode:stop changes workflow state, including after reconnect.
     const retryProgram = this.stopPhase === 'interrupted' && this.stopIntent === 'program' && this.stopPort === this.status.port;

@@ -7,11 +7,13 @@ export class Grbl {
     this.jogPhase = 'idle';
     this.jogGeneration = null;
     this.jogEpoch = null;
+    this.jogErrorSequence = 0;
     this.cancelSequence = 0;
     this.jogSequence = 0;
     this.jogPositionSequence = 0;
     this.jogTimer = null;
     this.jogTarget = null;
+    this.jogCompletionNotice = 'none';
     this.spindleDirectionMode = 'M3';
   }
   get state() { return this.session.state || {}; }
@@ -137,8 +139,8 @@ export class Grbl {
     const value = Number(this.settings[`$${110 + index}`]);
     return index >= 0 && Number.isFinite(value) && value > 0 ? value : null;
   }
-  position(axis) {
-    const report = this.session.positionReport;
+  position(axis, kind) {
+    const report = kind ? this.session.positionReports?.[kind] : this.session.positionReport;
     const units = Number(report?.units);
     if (!report || ![0, 1].includes(units)) return null;
     const value = report.values[['X', 'Y', 'Z'].indexOf(axis)];
@@ -150,46 +152,77 @@ export class Grbl {
   }
   jogCompleted() {
     if (this.activeState !== 'Idle') return false;
-    if (!this.jogTarget) return this.session.reportSequence >= this.jogSequence + 2 && this.session.idleReports >= 2;
-    const position = this.position(this.jogTarget.axis);
-    if (!position || position.sequence <= this.jogPositionSequence || position.kind !== this.jogTarget.kind || position.units !== this.jogTarget.units) return false;
+    const acknowledgedIdle = this.jogReceipt?.state === 'acknowledged'
+      && this.session.reportSequence >= this.jogReceipt.reportSequence + 2 && this.session.idleReports >= 2;
+    if (!this.jogTarget) return this.unmeasuredJogCompleted(acknowledgedIdle);
+    const position = this.position(this.jogTarget.axis, this.jogTarget.kind);
+    if (!position || position.kind !== this.jogTarget.kind || position.units !== this.jogTarget.units) return false;
     const tolerance = Math.max(position.resolution, this.jogTarget.resolution) + 1e-8;
-    // A stale Idle report at the starting point cannot confirm completion.
-    if (Math.abs(position.value - this.jogTarget.start) < tolerance) {
-      // A tiny Step can round to no visible travel. Continuous rejects such
-      // segments before sending; Step still needs to release its status poller.
-      return Math.abs(this.jogTarget.value - this.jogTarget.start) <= 2 * tolerance
-        && this.session.reportSequence >= this.jogSequence + 2 && this.session.idleReports >= 2;
-    }
+    // An unchanged frame is deduplicated by CNCjs. Tiny Steps and queued Steps
+    // returning to their start need the last command's acknowledgement followed
+    // by two fresh Idle reports: a dwell can report Idle before queued jogs run.
+    if (Math.abs(this.jogTarget.value - this.jogTarget.start) <= 2 * tolerance
+      && Math.abs(position.value - this.jogTarget.value) <= 2 * tolerance) return this.unmeasuredJogCompleted(acknowledgedIdle);
+    if (position.sequence <= this.jogPositionSequence || Math.abs(position.value - this.jogTarget.start) < tolerance) return false;
     return Math.abs(position.value - this.jogTarget.value) <= tolerance;
+  }
+  unmeasuredJogCompleted(acknowledgedIdle) {
+    if (this.session.replyTracking === 'unknown'
+      && this.session.reportSequence >= this.jogSequence + 2 && this.session.idleReports >= 2) {
+      this.jogPhase = 'armed';
+      if (this.jogCompletionNotice === 'none') {
+        this.jogCompletionNotice = 'shown';
+        this.log('Jog completion cannot be confirmed after joining an active controller or program activity. Polling paused; jog cancellation remains armed. Change mode/axis or press Stop to cancel. Reset restores acknowledgement tracking.');
+      }
+    }
+    return acknowledgedIdle;
   }
   clearJog() {
     if (this.jogTimer !== null) this.cancel(this.jogTimer);
     this.jogTimer = null;
     this.jogPhase = 'idle';
     this.jogTarget = null;
+    this.jogReceipt = null;
+    this.jogCompletionNotice = 'none';
   }
   jogSessionChanged() {
-    return this.jogGeneration !== this.session.generation || this.jogEpoch !== this.session.motionEpoch;
+    return this.jogGeneration !== this.session.generation || this.jogEpoch !== this.session.motionEpoch
+      || this.jogWorkflowEpoch !== this.session.workflowEpoch;
   }
   cancellationCompleted() {
     return this.session.reportSequence >= this.cancelSequence + 2 && this.session.idleReports >= 2 && this.activeState === 'Idle';
+  }
+  recoverJogError() {
+    const error = this.session.controllerError;
+    if (!['active', 'armed'].includes(this.jogPhase) || !error || error.sequence <= this.jogErrorSequence || this.jogSessionChanged()) return 'unchanged';
+    if (this.session.status?.phase !== 'joined' || this.session.workflowState !== 'idle' || this.session.stopPhase !== 'idle') return 'unchanged';
+    this.jogErrorSequence = error.sequence;
+    if (this.jogPhase === 'armed' && this.jogReceipt?.transmission === 'written'
+      && !['written', 'rejected'].includes(this.jogReceipt.state)) return 'unchanged';
+    this.log(`Controller ${error.line} during pendant jogging; canceling queued jogs and waiting for Idle.`);
+    this.cancelJog('controller-error');
+    return 'recovering';
   }
   pollJog() {
     if (this.jogTimer !== null) return;
     this.jogTimer = this.schedule(() => {
       this.jogTimer = null;
       if (this.jogSessionChanged() || this.session.status?.phase !== 'joined' || this.session.stopPhase !== 'idle' || this.session.workflowState !== 'idle' || ['Alarm', 'Sleep', 'Check'].includes(this.activeState)) { this.clearJog(); return; }
+      if (this.recoverJogError() === 'recovering') return;
       if (this.jogPhase === 'idle' || (this.jogPhase === 'active' && this.jogCompleted()) || (this.jogPhase === 'canceling' && this.cancellationCompleted())) { this.clearJog(); return; }
+      if (this.jogPhase === 'armed') return;
       this._cmd('statusreport');
       this.pollJog();
     }, 100);
   }
-  cancelJog() {
-    if (this.jogPhase !== 'active') return;
+  cancelJog(cause = 'operator') {
+    if (cause === 'operator' && this.recoverJogError() === 'recovering') return;
+    if (!['active', 'armed'].includes(this.jogPhase)) return;
     this.jogPhase = 'idle';
-    if (this.jogSessionChanged() || this.session.workflowState !== 'idle' || this.jogCompleted()) { this.clearJog(); return; }
-    this._cmd('feeder:stop');
+    if (this.jogSessionChanged() || this.session.workflowState !== 'idle' || (cause === 'operator' && this.jogCompleted())) { this.clearJog(); return; }
+    // Once the last owned line was written, no owned commands remain in the
+    // feeder. A later CNCjs macro must not be discarded by passive cancellation.
+    if (this.jogReceipt?.transmission !== 'written') this._cmd('feeder:stop');
     if (this._cmd('jogCancel') === 'dropped') return;
     this.cancelSequence = this.session.reportSequence;
     this.jogPhase = 'canceling';
@@ -198,7 +231,8 @@ export class Grbl {
   }
   jogPulse(axis, distance, feed) {
     if (this.jogSessionChanged()) this.clearJog();
-    if (this.jogPhase === 'active' && this.jogGeneration === this.session.generation) {
+    this.recoverJogError();
+    if (['active', 'armed'].includes(this.jogPhase) && this.jogGeneration === this.session.generation) {
       if (!this.jogCompleted()) return 'pending';
       this.jogPhase = 'idle';
     }
@@ -212,6 +246,7 @@ export class Grbl {
   jog(axis, distance, feed) {
     if (!['X', 'Y', 'Z'].includes(axis) || !Number.isFinite(distance) || Math.abs(distance) < 0.00005 || !Number.isFinite(feed) || !(feed > 0)) return this.refuse('Jog requires an XYZ axis and finite distance/feed.');
     if (this.jogSessionChanged()) this.clearJog();
+    this.recoverJogError();
     if (this.jogPhase === 'canceling') {
       if (!this.cancellationCompleted()) return this.refuse('Jog: waiting for cancellation to finish.');
       this.jogPhase = 'idle';
@@ -219,13 +254,26 @@ export class Grbl {
     if (!this.manualReady('allow-jog')) return this.refuse('Jog: controller must be idle or jogging with no running program.');
     const max = this.maxRate(axis);
     if (!max) return this.refuse(`Jog: waiting for GRBL ${axis} maximum-rate setting.`);
-    const position = this.position(axis);
-    const previous = this.jogPhase === 'active' && !this.jogCompleted() && this.jogTarget?.axis === axis ? this.jogTarget : position;
-    const result = this.gcode(`$J=G21 G91 ${axis}${distance.toFixed(4)} F${Math.min(feed, max).toFixed(3)}`);
-    if (result === 'dropped') return result;
+    let pending = ['active', 'armed'].includes(this.jogPhase) && !this.jogCompleted() && this.jogTarget?.axis === axis ? this.jogTarget : null;
+    // Passive ownership may outlive a separate CNCjs move or coordinate change.
+    // Rebase the next Step on fresh feedback once all owned lines were written;
+    // unsent owned lines still need their accumulated relative target.
+    const current = this.position(axis);
+    if (pending && this.jogPhase === 'armed' && this.activeState === 'Idle' && this.jogReceipt?.transmission === 'written'
+      && current && current.sequence > this.jogPositionSequence) {
+      const tolerance = Math.max(current.resolution, pending.resolution) + 1e-8;
+      if (current.kind !== pending.kind || current.units !== pending.units || Math.abs(current.value - pending.value) > 2 * tolerance) pending = null;
+    }
+    const position = this.position(axis, pending?.kind);
+    const previous = pending || position;
+    const receipt = this.session.jog(`$J=G21 G91 ${axis}${distance.toFixed(4)} F${Math.min(feed, max).toFixed(3)}`);
+    if (receipt.state === 'dropped') return 'dropped';
+    this.jogReceipt = receipt;
     this.jogPhase = 'active';
     this.jogGeneration = this.session.generation;
     this.jogEpoch = this.session.motionEpoch;
+    this.jogWorkflowEpoch = this.session.workflowEpoch;
+    this.jogErrorSequence = this.session.errorSequence ?? 0;
     this.jogSequence = this.session.reportSequence;
     this.jogPositionSequence = this.session.positionReport?.sequence ?? 0;
     this.jogTarget = previous ? { ...previous, axis, start: position?.value ?? previous.start, value: previous.value + Number(distance.toFixed(4)) } : null;
