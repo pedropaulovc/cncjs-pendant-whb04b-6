@@ -149,8 +149,9 @@ only logs its slot number. Bare Reset and Stop retain their normal behavior.
   segment with 200 ms of travel at that feed; a 180 ms gap between wheel reports cancels
   the jog. Direction, axis, and mode changes also cancel it. New motion waits
   for an Idle report at the commanded endpoint after each segment, or two
-  fresh Idle reports after cancellation. Status is
-  queried every 100 ms while the wheel turns. Acceleration and status latency
+  fresh Idle reports after cancellation. Both Step and Continuous request status
+  every 100 ms until completion or cancellation is confirmed. Updated CNCjs
+  position broadcasts also confirm completed endpoints. Acceleration and status latency
   can produce pauses between segments; this bounds queued travel if the
   connection drops. Very low rates whose segments fall below position/step
   resolution are refused with a log message. Browser/serial latency and GRBL

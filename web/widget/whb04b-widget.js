@@ -23,8 +23,6 @@ import { CncjsSession, isParentMessage } from './cncjs-session.js';
 import { Grbl } from './grbl.js';
 import { PendantControls, CONFIG_KEY, parseConfig } from './pendant-controls.js';
 
-let zProbeThickness = 20.0;   // touch-plate thickness (mm)
-
 //---------------------------------------------------------------------------
 // Credential + context acquisition from the parent frame
 //---------------------------------------------------------------------------
@@ -87,7 +85,7 @@ const session = new CncjsSession({
   io: (...args) => io(...args),
   origin: location.origin,
   onStatus(status) {
-    if (status.phase !== 'joined') { controls.suspend(); grbl.clearOverrides(); }
+    if (status.phase !== 'joined') { controls.suspend(); grbl.clearOverrides(); grbl.clearJog(); }
     ctx.port = status.port;
     setPill('sockPill', status.phase === 'joined', status.phase);
     refreshCtxUI();
@@ -95,7 +93,7 @@ const session = new CncjsSession({
   },
   onState: onControllerState,
 });
-const grbl = new Grbl(session, () => zProbeThickness, log);
+const grbl = new Grbl(session, () => $('thickness')?.valueAsNumber ?? NaN, log);
 const controls = new PendantControls(grbl, {
   log,
   onMode(mode) {
@@ -145,8 +143,6 @@ function wireUI() {
     catch (err) { log('Pendant error: ' + err.message); }
   };
   $('reconnectSock').onclick = () => { readParentStore(); refreshCtxUI(); connectSocket(); };
-  const thick = $('thickness');
-  if (thick) thick.onchange = () => { zProbeThickness = thick.valueAsNumber; };
   const config = $('config');
   try { controls.setConfig(parseConfig(JSON.parse(localStorage.getItem(CONFIG_KEY) || '{}'))); }
   catch (error) { log(`Pendant settings: ${error.message}`); }
@@ -188,6 +184,6 @@ function boot() {
 }
 
 document.addEventListener('DOMContentLoaded', boot);
-window.addEventListener('pagehide', () => { controls.suspend(); grbl.clearOverrides(); session.disconnect(); });
+window.addEventListener('pagehide', () => { controls.suspend(); grbl.clearOverrides(); grbl.clearJog(); session.disconnect(); });
 document.addEventListener('visibilitychange', () => { if (document.hidden) controls.suspend(); });
 

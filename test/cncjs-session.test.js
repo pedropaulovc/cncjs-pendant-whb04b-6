@@ -330,6 +330,7 @@ test('jog and fixed-distance macros use mm even after a prior G20 command', () =
   grbl.probeZ();
   assert.equal(commands[0][1][0], 'G21 G91');
   assert.equal(commands[0][1][2], 'G10 L20 P1 Z12.501');
+  grbl.clearJog();
 });
 
 test('a canceled poll callback cannot send commands to a new port', () => {
@@ -414,4 +415,88 @@ test('state/settings and raw status caches are isolated per controller generatio
   f.session.selectPort('COM2');
   assert.deepEqual(f.session.state,{}); assert.deepEqual(f.session.settings,{});
   assert.deepEqual(f.session.overrides,[]); assert.equal(f.session.activeState,'');
+});
+
+function gatedJogFixture() {
+  const f=fixture(); f.join();
+  f.socket.receive('workflow:state','idle');
+  f.socket.receive('controller:settings','Grbl',{settings:{$13:'0',$110:'3000',$111:'3000',$112:'1000'}});
+  const machine={state:'Idle',x:0,y:0,z:0};
+  const broadcast=()=>f.socket.receive('controller:state','Grbl',{status:{activeState:machine.state,mpos:Object.fromEntries(['x','y','z'].map(axis=>[axis,machine[axis].toFixed(3)]))}});
+  broadcast();
+  const jobs=new Set();
+  const grbl=new Grbl(f.session,()=>20,()=>{}, {schedule:fn=>{jobs.add(fn);return fn;},cancel:fn=>jobs.delete(fn)});
+  const emit=f.socket.emit.bind(f.socket);
+  f.socket.emit=(...args)=>{
+    emit(...args);
+    // Match CNCjs: its automatic status polls never forward serialport:read.
+    if(args[0]==='command' && args[2]==='statusreport') f.socket.receive('serialport:read',`<${machine.state}|MPos:${machine.x.toFixed(3)},${machine.y.toFixed(3)},${machine.z.toFixed(3)}|FS:0,0>`);
+    return f.socket;
+  };
+  const tick=()=>{for(const fn of [...jobs]) { jobs.delete(fn); fn(); }};
+  return {...f,grbl,machine,broadcast,jobs,tick};
+}
+
+test('automatic controller-state endpoint releases completed Step before a raw poll arrives',()=>{
+  const f=gatedJogFixture();
+  f.grbl.jog('X',0.04,250);
+  assert.equal(f.session.reportSequence,0);
+  f.machine.x=0.04; f.broadcast();
+  f.grbl.cancelJog();
+  assert.equal(stopCommands(f).some(([name])=>name==='jogCancel'),false);
+  assert.equal(f.grbl.jog('Y',0.04,250),'sent');
+  assert.equal(f.session.reportSequence,0);
+  assert.equal(f.jobs.size,1);
+  f.grbl.clearJog();
+});
+
+test('Step actively requests raw completion reports and stops its only poller on completion',()=>{
+  const f=gatedJogFixture(); f.grbl.jog('X',0.04,250);
+  f.machine.x=0.04;
+  f.tick(); assert.equal(f.session.reportSequence,1);
+  f.tick(); assert.equal(f.jobs.size,0); assert.equal(f.grbl.jogPhase,'idle');
+  assert.equal(stopCommands(f).filter(([name])=>name==='statusreport').length,1);
+});
+
+test('jog cancellation requests both raw Idle reports without an unrelated query',()=>{
+  const f=gatedJogFixture(); f.grbl.jog('X',1,250);
+  f.machine.state='Jog'; f.broadcast(); f.grbl.cancelJog();
+  assert.equal(f.session.reportSequence,1);
+  f.machine.state='Idle'; f.machine.x=0.02;
+  f.tick(); assert.equal(f.grbl.jogPhase,'canceling');
+  f.tick(); f.tick();
+  assert.equal(f.session.idleReports,2);
+  assert.equal(f.jobs.size,0); assert.equal(f.grbl.jogPhase,'idle');
+  assert.equal(f.grbl.jog('Y',0.04,250),'sent');
+  f.grbl.clearJog();
+});
+
+for(const event of ['disconnect','reset','stop']) test(`jog poller is discarded on ${event}`,()=>{
+  const f=gatedJogFixture(); f.grbl.jog('X',1,250);
+  if(event==='disconnect') f.session.disconnect();
+  if(event==='reset') f.grbl.reset();
+  if(event==='stop') f.grbl.stop();
+  const count=stopCommands(f).length;
+  f.tick(); assert.equal(f.jobs.size,0);
+  assert.equal(stopCommands(f).length,count);
+});
+
+test('external controller reset discards the jog target without changing the Stop generation',()=>{
+  const f=gatedJogFixture(); f.grbl.jog('X',1,250);
+  const generation=f.session.generation;
+  f.socket.receive('serialport:read','Grbl 1.1h [\'$\' for help]');
+  assert.equal(f.session.generation,generation);
+  assert.equal(f.session.motionEpoch,1);
+  f.tick(); assert.equal(f.jobs.size,0); assert.equal(f.grbl.jogPhase,'idle');
+  assert.equal(f.session.positionReport,null);
+  f.broadcast();
+  assert.equal(f.grbl.jogPulse('X',0.2,60),'sent');
+  f.grbl.clearJog();
+});
+
+test('a Step below physical/report resolution completes after two requested Idle reports',()=>{
+  const f=gatedJogFixture(); f.session.settings.settings.$100='200';
+  f.grbl.jog('X',0.001,250);
+  f.tick(); f.tick(); f.tick();
+  assert.equal(f.jobs.size,0); assert.equal(f.grbl.jogPhase,'idle');
 });

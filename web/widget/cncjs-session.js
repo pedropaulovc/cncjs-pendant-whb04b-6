@@ -17,6 +17,10 @@ export class CncjsSession {
     this.overrideSequence = 0;
     this.overrides = [];
     this.positionReport = null;
+    this.positionSequence = 0;
+    this.statePositionSignature = '';
+    this.motionState = '';
+    this.motionEpoch = 0;
     this.activeState = '';
     this.selection = 'automatic';
     this.selectedPort = null;
@@ -40,6 +44,8 @@ export class CncjsSession {
     this.activeState = '';
     this.overrides = [];
     this.positionReport = null;
+    this.statePositionSignature = '';
+    this.motionState = '';
     this.idleReports = 0;
     this.generation += 1;
     this.pendingPort = null;
@@ -102,6 +108,15 @@ export class CncjsSession {
     on('controller:state', (type, state) => {
       if (type !== 'Grbl') return;
       this.state = state;
+      const status = state?.status || {};
+      const kind = status.mpos ? 'MPos' : 'WPos';
+      const position = status.mpos || status.wpos;
+      const words = ['x', 'y', 'z'].map(axis => position?.[axis]);
+      const signature = JSON.stringify([status.activeState, ...words]);
+      if (signature !== this.statePositionSignature && words.every(value => value !== undefined)) {
+        this.statePositionSignature = signature;
+        this.recordPosition(kind, words.map(String), status.activeState);
+      }
       if (Array.isArray(state?.status?.ov) && state.status.ov.length === 3) this.overrides = state.status.ov.map(Number);
       this.onState(type, state);
     });
@@ -112,21 +127,26 @@ export class CncjsSession {
       if ((this.pendingPort || this.status.port) && ['idle', 'running', 'paused'].includes(state)) this.workflowState = state;
     });
     on('serialport:read', line => {
+      if (typeof line === 'string' && line.startsWith('Grbl ')) {
+        this.motionEpoch += 1;
+        this.motionState = '';
+        this.activeState = '';
+        this.positionReport = null;
+        this.overrides = [];
+        this.statePositionSignature = '';
+        this.state = {};
+      }
       const state = typeof line === 'string' ? /^<([^|>]+)/.exec(line)?.[1] : null;
       if (state) {
         this.activeState = state;
+        this.motionState = state;
         this.reportSequence += 1;
         this.idleReports = state === 'Idle' ? this.idleReports + 1 : 0;
       }
       const position = typeof line === 'string' ? /\|(MPos|WPos):([^|>]+)/.exec(line) : null;
       if (position) {
         const words = position[2].split(',').slice(0, 3);
-        const values = words.map(Number);
-        if (words.length === 3 && values.every(Number.isFinite)) {
-          this.positionReport = { kind: position[1], values, sequence: this.reportSequence,
-            units: this.settings.settings?.$13,
-            resolution: Math.max(...words.map(word => 10 ** -(word.split('.')[1]?.length || 0))) };
-        }
+        this.recordPosition(position[1], words, state);
       }
       const overrides = typeof line === 'string' ? /\|Ov:(\d+),(\d+),(\d+)/.exec(line) : null;
       if (overrides) { this.overrides = overrides.slice(1).map(Number); this.overrideSequence += 1; }
@@ -134,6 +154,15 @@ export class CncjsSession {
     });
     on('serialport:list', (ports) => this.join(ports));
     this.timer = this.schedule(() => this.discover(), 2000);
+  }
+
+  recordPosition(kind, words, activeState) {
+    const values = words.map(Number);
+    if (!activeState || words.length !== 3 || !values.every(Number.isFinite)) return;
+    this.motionState = activeState;
+    this.positionReport = { kind, values, sequence: ++this.positionSequence,
+      units: this.settings.settings?.$13,
+      resolution: Math.max(...words.map(word => 10 ** -(word.split('.')[1]?.length || 0))) };
   }
 
   join(ports) {

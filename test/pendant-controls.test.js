@@ -164,7 +164,9 @@ test('Continuous never queues behind a slow segment and never starts motion from
   assert.equal(f.commands.filter(([c])=>c==='gcode').length,1);
   f.input({jog:1});
   assert.equal(f.commands.filter(([c])=>c==='gcode').length,2);
-  f.timer.advance(180); assert.equal(f.timer.timers.size,0);
+  f.timer.advance(180);
+  f.session.reportSequence+=2; f.session.idleReports=2;
+  f.timer.advance(100); assert.equal(f.timer.timers.size,0);
 });
 
 test('invalid probe thickness refuses motion while an explicit zero remains valid', () => {
