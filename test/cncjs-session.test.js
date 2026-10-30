@@ -119,6 +119,16 @@ test('Stop cancels jogging without resetting and blocks motion while pending', (
   assert.equal(stopCommands(f).at(-1)[0], 'cyclestart');
 });
 
+test('Stop aborts homing with reset and confirms the resulting alarm', () => {
+  const f = fixture(); f.join(); f.session.stop(); report(f, 'Home');
+  assert.equal(stopCommands(f).at(-1)[0], 'reset');
+  f.socket.receive('serialport:read', "Grbl 1.1h ['$' for help]");
+  report(f, 'Alarm');
+  assert.notEqual(f.session.stopPhase, 'idle');
+  report(f, 'Alarm');
+  assert.equal(f.session.stopPhase, 'idle');
+});
+
 for (const action of ['disconnect', 'selectPort']) test(`Stop abandons pending actions on ${action}`, () => {
   const f = fixture(); f.join(); f.session.stop();
   report(f, 'Run');

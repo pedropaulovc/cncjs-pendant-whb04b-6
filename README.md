@@ -118,6 +118,8 @@ inspect CNCjs and press Stop or Reset to recover. Follow the controller's
 unlock/homing procedure after a reset. Stop at Idle or during jogging does not
 switch off the spindle. These software controls depend on the
 browser and serial connection and do not replace a wired emergency stop.
+Stop aborts homing with a reset, which may require unlocking and homing again.
+For a safety-door, sleep, or check state, inspect CNCjs; Reset remains available.
 
 ## How it works
 

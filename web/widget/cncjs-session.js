@@ -182,6 +182,12 @@ export class CncjsSession {
       this.update('joined', state === 'Alarm' ? 'Stop completed with controller alarm; inspect CNCjs.' : 'Stop completed.');
       return;
     }
+    // GRBL homing cannot be feed-held; reset aborts it and may raise an alarm.
+    if (state === 'Home') {
+      this.update('joined', 'Stopping: aborting homing with controller reset.');
+      this.command('reset');
+      return;
+    }
     if (state === 'Hold:0') {
       this.update('joined', 'Stopping: hold complete; resetting controller.');
       this.command('reset');
