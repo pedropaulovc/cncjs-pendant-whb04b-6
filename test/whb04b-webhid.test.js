@@ -232,6 +232,35 @@ function deferred() {
   return { promise, resolve };
 }
 
+test('concurrent and remove-reentrant destroy share cleanup until close completes', async t => {
+  const hid = new EventTarget();
+  Object.defineProperty(navigator, 'hid', { configurable: true, value: hid });
+  t.after(() => { delete navigator.hid; });
+  const pendant = new WHB04BWebHID();
+  const started = deferred(), finish = deferred();
+  let closes = 0;
+  const a = Object.assign(new EventTarget(), { opened: true, async close() { closes++; started.resolve(); await finish.promise; this.opened = false; } });
+  const b = Object.assign(new EventTarget(), { opened: true });
+  await pendant._attach(a);
+  let reentrant;
+  pendant.addEventListener('remove', () => { reentrant = pendant.destroy(); }, { once: true });
+  const first = pendant.destroy();
+  const second = pendant.destroy();
+  assert.equal(first, second);
+  await started.promise;
+  assert.equal(first, reentrant);
+  await assert.rejects(pendant._attach(b), /being disconnected/);
+  assert.equal(pendant._lifecycle, 'destroying');
+  finish.resolve();
+  await Promise.all([first, second, reentrant]);
+  assert.equal(closes, 1);
+  await pendant._attach(b);
+  const unplug = new Event('disconnect');
+  Object.assign(unplug, { device: b });
+  hid.dispatchEvent(unplug);
+  assert.equal(pendant.connected, false);
+});
+
 test('demo disconnect/connect restores physical unplug listeners and rejects old device input', async t => {
   const hid = new EventTarget();
   const createDevice = () => Object.assign(new EventTarget(), {

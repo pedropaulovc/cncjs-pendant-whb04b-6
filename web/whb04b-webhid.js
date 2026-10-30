@@ -88,6 +88,7 @@ export class WHB04BWebHID extends EventTarget {
     this._deviceClosing = new WeakMap();
     this._deviceOpening = new WeakMap();
     this._lifecycle = 'active';
+    this._destroyPromise = null;
     // React to physical plug/unplug of the already-authorised device.
     this._onConnect = (e) => { if (this._matches(e.device) && !this.connected) this._attach(e.device).catch(() => {}); };
     this._onDisconnect = (e) => { if (e.device === this.device) this._teardown(true); };
@@ -258,8 +259,19 @@ export class WHB04BWebHID extends EventTarget {
     await this.sendDisplayData(f);
   }
 
-  async destroy() {
+  destroy() {
+    if (this._destroyPromise) return this._destroyPromise;
     this._lifecycle = 'destroying';
+    this._displayEpoch++;
+    // Install the shared promise before teardown can dispatch remove and reenter.
+    this._destroyPromise = Promise.resolve().then(() => this._destroy()).finally(() => {
+      this._lifecycle = 'active';
+      this._destroyPromise = null;
+    });
+    return this._destroyPromise;
+  }
+
+  async _destroy() {
     const dev = this.device;
     const closing = dev ? this._closeDevice(dev) : Promise.resolve();
     this._teardown(true);
@@ -268,6 +280,5 @@ export class WHB04BWebHID extends EventTarget {
       navigator.hid.removeEventListener('connect', this._onConnect);
       navigator.hid.removeEventListener('disconnect', this._onDisconnect);
     }
-    this._lifecycle = 'active';
   }
 }
