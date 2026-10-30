@@ -232,6 +232,52 @@ function deferred() {
   return { promise, resolve };
 }
 
+test('discovery invoked by remove during destroy never starts or revives the connection', async t => {
+  const hid = new EventTarget();
+  hid.getDevices = hid.requestDevice = () => { assert.fail('Discovery must not start during destroy'); };
+  Object.defineProperty(navigator, 'hid', { configurable: true, value: hid });
+  t.after(() => { delete navigator.hid; });
+  const pendant = new WHB04BWebHID();
+  let automatic, chooser;
+  pendant.addEventListener('remove', () => { automatic = pendant.tryReconnect(); chooser = pendant.requestDevice(); });
+  await pendant.destroy();
+  assert.equal(await automatic, false);
+  assert.equal(await chooser, false);
+  assert.equal(pendant.connected, false);
+});
+
+test('unplugging the old device while the chooser is open preserves the new selection', async t => {
+  const hid = new EventTarget();
+  const choice = deferred();
+  hid.requestDevice = () => choice.promise;
+  Object.defineProperty(navigator, 'hid', { configurable: true, value: hid });
+  t.after(() => { delete navigator.hid; });
+  const pendant = new WHB04BWebHID();
+  const a = Object.assign(new EventTarget(), { opened: true });
+  const b = Object.assign(new EventTarget(), { opened: true });
+  await pendant._attach(a);
+  const selected = pendant.requestDevice();
+  const unplug = new Event('disconnect');
+  Object.assign(unplug, { device: a });
+  hid.dispatchEvent(unplug);
+  choice.resolve([b]);
+  assert.equal(await selected, true);
+  assert.equal(pendant.device, b);
+  assert.equal(pendant.connected, true);
+});
+
+test('destroy blocks LCD writes synchronously before deferred cleanup runs', async () => {
+  const pendant = new WHB04BWebHID();
+  pendant.device = {
+    opened: true, removeEventListener() {}, async close() {},
+    sendFeatureReport() { assert.fail('No LCD chunk may start after destroy'); },
+  };
+  pendant.connected = true;
+  const destroy = pendant.destroy();
+  await assert.rejects(pendant.sendDisplayData(buildDisplayFrame()), /being disconnected/);
+  await destroy;
+});
+
 test('concurrent and remove-reentrant destroy share cleanup until close completes', async t => {
   const hid = new EventTarget();
   Object.defineProperty(navigator, 'hid', { configurable: true, value: hid });

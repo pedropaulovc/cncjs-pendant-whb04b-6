@@ -85,6 +85,7 @@ export class WHB04BWebHID extends EventTarget {
     this._pendingDisplay = null;
     this._displayWriter = null;
     this._displayEpoch = 0;
+    this._discoveryEpoch = 0;
     this._deviceClosing = new WeakMap();
     this._deviceOpening = new WeakMap();
     this._lifecycle = 'active';
@@ -107,10 +108,11 @@ export class WHB04BWebHID extends EventTarget {
   }
 
   async tryReconnect() {
+    if (this._lifecycle !== 'active') return false;
     if (!WHB04BWebHID.isSupported()) return false;
-    const epoch = this._displayEpoch;
+    const epoch = this._discoveryEpoch;
     const devices = await navigator.hid.getDevices();
-    if (epoch !== this._displayEpoch || this._lifecycle !== 'active') return false;
+    if (epoch !== this._discoveryEpoch || this._lifecycle !== 'active') return false;
     const match = devices.find((d) => this._matches(d));
     if (!match) return false;
     await this._attach(match);
@@ -118,12 +120,13 @@ export class WHB04BWebHID extends EventTarget {
   }
 
   async requestDevice() {
+    if (this._lifecycle !== 'active') return false;
     if (!WHB04BWebHID.isSupported()) throw new Error('WebHID not supported in this browser.');
-    const epoch = this._displayEpoch;
+    const epoch = this._discoveryEpoch;
     const devices = await navigator.hid.requestDevice({
       filters: [{ vendorId: WHB04B_VENDOR_ID, productId: WHB04B_PRODUCT_ID }],
     });
-    if (epoch !== this._displayEpoch || this._lifecycle !== 'active') return false;
+    if (epoch !== this._discoveryEpoch || this._lifecycle !== 'active') return false;
     if (!devices.length) return false;
     await this._attach(devices[0]);
     return true;
@@ -228,10 +231,11 @@ export class WHB04BWebHID extends EventTarget {
   }
 
   async _writeFrame(frame, epoch) {
+    if (this._lifecycle !== 'active') throw new Error('Pendant is being disconnected.');
     if (!this.device || !this.connected) throw new Error('Device not connected.');
     const device = this.device;
     for (let i = 0; i < OUTPUT_PAYLOAD_SIZE; i += OUTPUT_CHUNK) {
-      if (epoch !== this._displayEpoch || device !== this.device || !this.connected) throw new Error('Device disconnected during LCD update.');
+      if (this._lifecycle !== 'active' || epoch !== this._displayEpoch || device !== this.device || !this.connected) throw new Error('Device disconnected during LCD update.');
       const chunk = new Uint8Array(OUTPUT_CHUNK);
       chunk.set(frame.subarray(i, i + OUTPUT_CHUNK));
       let timer;
@@ -262,6 +266,7 @@ export class WHB04BWebHID extends EventTarget {
   destroy() {
     if (this._destroyPromise) return this._destroyPromise;
     this._lifecycle = 'destroying';
+    this._discoveryEpoch++;
     this._displayEpoch++;
     // Install the shared promise before teardown can dispatch remove and reenter.
     this._destroyPromise = Promise.resolve().then(() => this._destroy()).finally(() => {
