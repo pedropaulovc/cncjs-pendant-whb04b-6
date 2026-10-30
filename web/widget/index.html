@@ -23,6 +23,21 @@
   .card .value { font-size: 1.1rem; font-weight: 600; }
   label.field { display: inline-flex; flex-direction: column; font-size: .7rem; gap: 2px; }
   input { font: inherit; padding: 3px; width: 5rem; }
+  select, textarea { font: inherit; }
+  .settings-help, .settings-status { font-size: .75rem; line-height: 1.45; }
+  .settings-status { min-height: 1.1em; overflow-wrap: anywhere; }
+  .settings-status[data-state="error"] { color: #c0392b; }
+  #macroAssignments { display: grid; gap: 8px; margin: 10px 0; }
+  .macro-assignment { min-width: 0; margin: 0; padding: 8px; border: 1px solid #8885; border-radius: 7px; }
+  .macro-assignment legend { padding: 0 4px; font-size: .8rem; font-weight: 600; }
+  .macro-slot { margin-left: 6px; font-size: .7rem; font-weight: 400; opacity: .7; }
+  .macro-choice { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: center; font-size: .75rem; }
+  .macro-choice select { min-width: 0; width: 100%; padding: 5px; }
+  .macro-code { display: block; width: 100%; box-sizing: border-box; margin-top: 8px; padding: 6px; resize: vertical; font-family: ui-monospace, monospace; font-size: .75rem; }
+  .macro-preview { white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0 0; padding: 6px; max-height: 12rem; overflow: auto; background: #8881; font-size: .75rem; }
+  .macro-note { margin: 6px 0 0; font-size: .72rem; line-height: 1.4; overflow-wrap: anywhere; }
+  .macro-note[data-state="missing"] { color: #c0392b; }
+  [hidden] { display: none !important; }
   #log { font-family: ui-monospace, monospace; font-size: .72rem; white-space: pre; background: #8881; border-radius: 7px; padding: 6px; height: 130px; overflow: auto; }
 </style>
 </head>
@@ -57,11 +72,15 @@
       <label class="field">Spindle increment (RPM)<input id="spindleIncrement" type="number" min="1" value="100" /></label>
       <label class="field">5/10 mm steps<select id="largeSteps"><option value="disabled">Disabled</option><option value="enabled">Enabled</option></select></label>
     </div>
-    <details><summary>Advanced: G-code macros</summary>
-      <p style="font-size:.75rem">JSON slots: 1, 2, 5, 6, 7, 9, 11, 12, 13, 14. Example: {"1":"G0 X0"}. Use \n between lines.</p>
-      <textarea id="config" rows="6" style="width:100%;box-sizing:border-box" aria-label="G-code macros JSON"></textarea>
+    <details><summary>Macro buttons</summary>
+      <p class="settings-help">Choose what each Fn combination runs. Use a saved CNCjs macro or enter custom G-code, one command per line.</p>
+      <p class="settings-help">Saved macros are managed in the CNCjs Macro widget. Assignments here stay linked to those macros, so changes in CNCjs apply when you run them.</p>
+      <button id="refreshMacros" type="button">Refresh CNCjs macros</button>
+      <p id="macroStatus" class="settings-status" role="status" aria-live="polite"></p>
+      <div id="macroAssignments"></div>
     </details>
-    <button id="saveConfig">Save settings</button>
+    <button id="saveConfig" type="button">Save settings</button>
+    <p id="settingsStatus" class="settings-status" role="status" aria-live="polite"></p>
   </details>
   <h2 style="font-size:.8rem;margin:10px 0 4px">Log</h2>
   <div id="log"></div>
