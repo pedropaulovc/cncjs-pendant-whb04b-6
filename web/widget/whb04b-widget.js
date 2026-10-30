@@ -23,11 +23,32 @@ import { CncjsSession, isParentMessage } from './cncjs-session.js';
 import { Grbl } from './grbl.js';
 import { PendantControls, CONFIG_KEY, parseConfig } from './pendant-controls.js';
 import { controllerDisplayFrame } from './pendant-display.js';
+import { MacroSettings } from './macro-settings.js';
+import { CncjsMacros } from './cncjs-macros.js';
+import { SavedMacroRunner } from './macro-runner.js';
 
 //---------------------------------------------------------------------------
 // Credential + context acquisition from the parent frame
 //---------------------------------------------------------------------------
 const ctx = { token: null, port: null, controller: 'Grbl' };
+const macroLibrary = new CncjsMacros({ getToken: () => ctx.token });
+let macroSettings;
+let catalogRequest = 0;
+
+async function refreshMacros() {
+  if (!macroSettings) return;
+  const request = ++catalogRequest;
+  if (!ctx.token) { macroSettings.setStatus('unloaded', 'Connect to CNCjs to load saved macros.'); return; }
+  macroSettings.setStatus('loading');
+  try {
+    const records = await macroLibrary.list();
+    if (request !== catalogRequest) return;
+    macroSettings.setCatalog(records);
+    macroSettings.setStatus('ready');
+  } catch (error) {
+    if (request === catalogRequest) macroSettings.setStatus('error', error.message);
+  }
+}
 
 function readQuery() {
   const q = new URLSearchParams(location.search);
@@ -94,10 +115,14 @@ const session = new CncjsSession({
     onControllerState('Grbl', session.state);
   },
   onState: onControllerState,
+  onConfig: refreshMacros,
 });
 const grbl = new Grbl(session, () => $('thickness')?.valueAsNumber ?? NaN, log);
+const savedMacroRunner = new SavedMacroRunner({ session, grbl, library: macroLibrary, log });
 const controls = new PendantControls(grbl, {
   log,
+  onSavedMacro: id => savedMacroRunner.run(id),
+  onSuspend: () => savedMacroRunner.cancel(),
   onMode(mode) {
     jogMode = { step: JogMode.Step, continuous: JogMode.Continuous }[mode] ?? JogMode.None;
     $('mode').textContent = mode;
@@ -115,6 +140,7 @@ function connectSocket() {
   if (!ctx.token) { log('No token from parent frame; cannot connect socket.'); return; }
   if (typeof io === 'undefined') { log('socket.io client not loaded (open inside CNCjs).'); return; }
   session.connect(ctx.token);
+  refreshMacros();
 }
 
 // Push live machine coordinates / feed to the pendant LCD.
@@ -159,20 +185,25 @@ function wireUI() {
     catch (err) { log('Pendant error: ' + err.message); }
   };
   $('reconnectSock').onclick = () => { readParentStore(); refreshCtxUI(); connectSocket(); };
-  const config = $('config');
   try { controls.setConfig(parseConfig(JSON.parse(localStorage.getItem(CONFIG_KEY) || '{}'))); }
   catch (error) { log(`Pendant settings: ${error.message}`); }
-  config.value = JSON.stringify(controls.config.macros, null, 2);
+  const settingsStatus = $('settingsStatus');
+  const changed = () => { settingsStatus.textContent = 'Unsaved changes.'; };
+  macroSettings = new MacroSettings({ container: $('macroAssignments'), status: $('macroStatus'),
+    refreshButton: $('refreshMacros'), onRefresh: refreshMacros, onChange: changed });
+  macroSettings.setAssignments(controls.config.macros);
   $('stepFeed').value = controls.config.stepFeed;
   $('spindleIncrement').value = controls.config.spindleIncrement;
   $('largeSteps').value = controls.config.largeSteps;
+  for (const id of ['stepFeed', 'spindleIncrement', 'largeSteps']) $(id).addEventListener('input', changed);
   $('saveConfig').onclick = () => {
     try {
-      const value = parseConfig({ macros: JSON.parse(config.value), stepFeed: Number($('stepFeed').value), spindleIncrement: Number($('spindleIncrement').value), largeSteps: $('largeSteps').value });
-      controls.setConfig(value);
+      const value = parseConfig({ macros: macroSettings.getAssignments(), stepFeed: Number($('stepFeed').value), spindleIncrement: Number($('spindleIncrement').value), largeSteps: $('largeSteps').value });
       localStorage.setItem(CONFIG_KEY, JSON.stringify(value));
+      controls.setConfig(value);
+      settingsStatus.textContent = 'Settings saved for this browser and CNCjs address.';
       log('Pendant settings saved for this browser and CNCjs address.');
-    } catch (error) { log(`Pendant settings: ${error.message}`); }
+    } catch (error) { settingsStatus.textContent = error.message; log(`Pendant settings: ${error.message}`); }
   };
 }
 

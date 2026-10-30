@@ -19,15 +19,17 @@ export function parseConfig(value) {
   if (!config.macros || typeof config.macros !== 'object' || Array.isArray(config.macros)) throw new Error('Macros must be an object keyed by macro number.');
   const allowed = new Set(Object.values(MACROS).map(String));
   for (const [number, code] of Object.entries(config.macros)) {
-    if (!allowed.has(number) || typeof code !== 'string' || code.length > 2000) throw new Error(`Invalid macro ${number}; use slots 1,2,5,6,7,9,11,12,13,14 and G-code text.`);
+    const custom = typeof code === 'string' && code.length <= 2000;
+    const saved = code?.source === 'cncjs' && typeof code.id === 'string' && code.id.trim().length > 0 && code.id.length <= 200;
+    if (!allowed.has(number) || (!custom && !saved)) throw new Error(`Invalid macro ${number}; choose custom G-code or a saved CNCjs macro.`);
   }
   return config;
 }
 
 export class PendantControls {
-  constructor(grbl, { log = () => {}, onMode = () => {}, onCoordinates = () => {},
+  constructor(grbl, { log = () => {}, onMode = () => {}, onCoordinates = () => {}, onSavedMacro = () => {}, onSuspend = () => {},
     schedule = (fn, ms) => setTimeout(fn, ms), cancel = id => clearTimeout(id), now = () => performance.now(), config = DEFAULT_CONFIG } = {}) {
-    Object.assign(this, { grbl, log, onMode, onCoordinates, schedule, cancel, now });
+    Object.assign(this, { grbl, log, onMode, onCoordinates, onSavedMacro, onSuspend, schedule, cancel, now });
     this.config = parseConfig(config);
     this.mode = 'mpg';
     this.coordinates = 'work';
@@ -40,6 +42,7 @@ export class PendantControls {
   }
   setConfig(config) { this.suspend(); this.config = parseConfig(config); }
   suspend() {
+    this.onSuspend();
     if (this.timer !== null) this.cancel(this.timer);
     this.timer = null;
     this.grbl.cancelJog();
@@ -53,7 +56,9 @@ export class PendantControls {
     this.onMode(mode);
   }
   macro(number) {
-    const code = this.config.macros[number]?.trim();
+    const assignment = this.config.macros[number];
+    if (assignment?.source === 'cncjs') { this.onSavedMacro(assignment.id); return; }
+    const code = assignment?.trim();
     if (!code) { this.log(`Macro ${number} is not configured.`); return; }
     this.grbl.macro(code.split(/\r?\n/).filter(line => line.trim()));
   }
