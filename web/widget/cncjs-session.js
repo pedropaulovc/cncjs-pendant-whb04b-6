@@ -22,6 +22,8 @@ export class CncjsSession {
     this.statePositionSignatures = {};
     this.motionState = '';
     this.motionEpoch = 0;
+    this.errorSequence = 0;
+    this.controllerError = null;
     this.activeState = '';
     this.selection = 'automatic';
     this.selectedPort = null;
@@ -48,6 +50,7 @@ export class CncjsSession {
     this.positionReports = {};
     this.statePositionSignatures = {};
     this.motionState = '';
+    this.controllerError = null;
     this.idleReports = 0;
     this.generation += 1;
     this.pendingPort = null;
@@ -128,6 +131,9 @@ export class CncjsSession {
       if ((this.pendingPort || this.status.port) && ['idle', 'running', 'paused'].includes(state)) this.workflowState = state;
     });
     on('serialport:read', line => {
+      if (typeof line === 'string' && /^error:\d+(?:\s|$)/.test(line)) {
+        this.controllerError = { sequence: ++this.errorSequence, line };
+      }
       if (typeof line === 'string' && line.startsWith('Grbl ')) {
         this.motionEpoch += 1;
         this.motionState = '';
@@ -137,6 +143,7 @@ export class CncjsSession {
         this.overrides = [];
         this.statePositionSignatures = {};
         this.state = {};
+        this.controllerError = null;
       }
       const state = typeof line === 'string' ? /^<([^|>]+)/.exec(line)?.[1] : null;
       if (state) {

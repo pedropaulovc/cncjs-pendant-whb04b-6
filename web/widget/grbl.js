@@ -7,6 +7,7 @@ export class Grbl {
     this.jogPhase = 'idle';
     this.jogGeneration = null;
     this.jogEpoch = null;
+    this.jogErrorSequence = 0;
     this.cancelSequence = 0;
     this.jogSequence = 0;
     this.jogPositionSequence = 0;
@@ -175,20 +176,31 @@ export class Grbl {
   cancellationCompleted() {
     return this.session.reportSequence >= this.cancelSequence + 2 && this.session.idleReports >= 2 && this.activeState === 'Idle';
   }
+  recoverJogError() {
+    const error = this.session.controllerError;
+    if (this.jogPhase !== 'active' || !error || error.sequence <= this.jogErrorSequence || this.jogSessionChanged()) return 'unchanged';
+    if (this.session.status?.phase !== 'joined' || this.session.workflowState !== 'idle' || this.session.stopPhase !== 'idle') return 'unchanged';
+    this.jogErrorSequence = error.sequence;
+    this.log(`Controller ${error.line} during pendant jogging; canceling queued jogs and waiting for Idle.`);
+    this.cancelJog('controller-error');
+    return 'recovering';
+  }
   pollJog() {
     if (this.jogTimer !== null) return;
     this.jogTimer = this.schedule(() => {
       this.jogTimer = null;
       if (this.jogSessionChanged() || this.session.status?.phase !== 'joined' || this.session.stopPhase !== 'idle' || this.session.workflowState !== 'idle' || ['Alarm', 'Sleep', 'Check'].includes(this.activeState)) { this.clearJog(); return; }
+      if (this.recoverJogError() === 'recovering') return;
       if (this.jogPhase === 'idle' || (this.jogPhase === 'active' && this.jogCompleted()) || (this.jogPhase === 'canceling' && this.cancellationCompleted())) { this.clearJog(); return; }
       this._cmd('statusreport');
       this.pollJog();
     }, 100);
   }
-  cancelJog() {
+  cancelJog(cause = 'operator') {
+    if (cause === 'operator' && this.recoverJogError() === 'recovering') return;
     if (this.jogPhase !== 'active') return;
     this.jogPhase = 'idle';
-    if (this.jogSessionChanged() || this.session.workflowState !== 'idle' || this.jogCompleted()) { this.clearJog(); return; }
+    if (this.jogSessionChanged() || this.session.workflowState !== 'idle' || (cause === 'operator' && this.jogCompleted())) { this.clearJog(); return; }
     this._cmd('feeder:stop');
     if (this._cmd('jogCancel') === 'dropped') return;
     this.cancelSequence = this.session.reportSequence;
@@ -198,6 +210,7 @@ export class Grbl {
   }
   jogPulse(axis, distance, feed) {
     if (this.jogSessionChanged()) this.clearJog();
+    this.recoverJogError();
     if (this.jogPhase === 'active' && this.jogGeneration === this.session.generation) {
       if (!this.jogCompleted()) return 'pending';
       this.jogPhase = 'idle';
@@ -212,6 +225,7 @@ export class Grbl {
   jog(axis, distance, feed) {
     if (!['X', 'Y', 'Z'].includes(axis) || !Number.isFinite(distance) || Math.abs(distance) < 0.00005 || !Number.isFinite(feed) || !(feed > 0)) return this.refuse('Jog requires an XYZ axis and finite distance/feed.');
     if (this.jogSessionChanged()) this.clearJog();
+    this.recoverJogError();
     if (this.jogPhase === 'canceling') {
       if (!this.cancellationCompleted()) return this.refuse('Jog: waiting for cancellation to finish.');
       this.jogPhase = 'idle';
@@ -227,6 +241,7 @@ export class Grbl {
     this.jogPhase = 'active';
     this.jogGeneration = this.session.generation;
     this.jogEpoch = this.session.motionEpoch;
+    this.jogErrorSequence = this.session.errorSequence ?? 0;
     this.jogSequence = this.session.reportSequence;
     this.jogPositionSequence = this.session.positionReport?.sequence ?? 0;
     this.jogTarget = previous ? { ...previous, axis, start: position?.value ?? previous.start, value: previous.value + Number(distance.toFixed(4)) } : null;

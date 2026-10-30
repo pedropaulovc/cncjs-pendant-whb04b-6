@@ -175,6 +175,8 @@ increment, and the large-step option. Changes are stored in browser localStorage
 under `whb04b-controls`, separately for each browser/profile and CNCjs origin.
 Step feed is capped by the selected axis's GRBL maximum rate. Jogging waits for
 controller settings instead of guessing a machine speed.
+If GRBL reports an error while the pendant owns a jog, the widget logs the error,
+cancels queued jogging, and waits for two Idle reports before accepting another jog.
 
 Only XYZ axes are supported by stock GRBL; A/B/C and Off do not jog. Macros,
 homing, spindle G-code, and coolant G-code require an idle controller with no

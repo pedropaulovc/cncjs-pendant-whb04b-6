@@ -424,8 +424,8 @@ function gatedJogFixture() {
   const machine={state:'Idle',x:0,y:0,z:0};
   const broadcast=()=>f.socket.receive('controller:state','Grbl',{status:{activeState:machine.state,mpos:Object.fromEntries(['x','y','z'].map(axis=>[axis,machine[axis].toFixed(3)]))}});
   broadcast();
-  const jobs=new Set();
-  const grbl=new Grbl(f.session,()=>20,()=>{}, {schedule:fn=>{jobs.add(fn);return fn;},cancel:fn=>jobs.delete(fn)});
+  const jobs=new Set(), logs=[];
+  const grbl=new Grbl(f.session,()=>20,message=>logs.push(message), {schedule:fn=>{jobs.add(fn);return fn;},cancel:fn=>jobs.delete(fn)});
   const emit=f.socket.emit.bind(f.socket);
   f.socket.emit=(...args)=>{
     emit(...args);
@@ -434,7 +434,7 @@ function gatedJogFixture() {
     return f.socket;
   };
   const tick=()=>{for(const fn of [...jobs]) { jobs.delete(fn); fn(); }};
-  return {...f,grbl,machine,broadcast,jobs,tick};
+  return {...f,grbl,machine,broadcast,jobs,tick,logs};
 }
 
 test('automatic controller-state endpoint releases completed Step before a raw poll arrives',()=>{
@@ -578,4 +578,56 @@ for(const travel of ['sub-resolution','out-and-back']) test(`unchanged dual-fram
   // Only raw MPos samples advance: both broadcasts finish at the old positions.
   for(let i=0;i<4;i++) { f.tick(); broadcast(); }
   assert.equal(f.grbl.jogPhase,'idle'); assert.equal(f.jobs.size,0);
+});
+
+test('a rejected Step drains owned jogs, confirms Idle, and recovers without endless polling',()=>{
+  const f=gatedJogFixture(); f.grbl.jog('X',1,250);
+  f.socket.receive('serialport:read','error:15 (Jog target exceeds machine travel)');
+  for(let i=0;i<5;i++) f.tick();
+  assert.equal(f.grbl.jogPhase,'idle'); assert.equal(f.jobs.size,0);
+  assert.equal(stopCommands(f).filter(([name])=>name==='feeder:stop').length,1);
+  assert.equal(stopCommands(f).filter(([name])=>name==='jogCancel').length,1);
+  assert.equal(f.grbl.jog('Y',0.04,250),'sent');
+  f.grbl.clearJog();
+});
+
+test('an error during an active segment drains motion and blocks new pulses through both Idle confirmations',()=>{
+  const f=gatedJogFixture(); f.grbl.jogPulse('X',1,250);
+  f.machine.state='Jog'; f.broadcast();
+  f.socket.receive('serialport:read','error:15 (Travel exceeded)');
+  assert.equal(f.grbl.jogPulse('X',1,250),'dropped');
+  assert.equal(f.grbl.jogPhase,'canceling');
+  assert.match(f.logs.at(-2),/error:15.*canceling queued jogs/);
+  for(let i=0;i<3;i++) f.tick();
+  assert.equal(stopCommands(f).filter(([name])=>name==='gcode').length,1);
+  assert.equal(f.grbl.jogPhase,'canceling');
+  f.machine.state='Idle'; f.machine.x=0.25;
+  f.tick(); assert.equal(f.grbl.jogPulse('X',1,250),'dropped');
+  f.tick(); f.tick(); assert.equal(f.jobs.size,0);
+  assert.equal(f.grbl.jogPulse('X',1,250),'sent');
+  f.grbl.clearJog();
+});
+
+for(const owner of ['program','stop']) test(`jog error recovery leaves the ${owner} interlock in control`,()=>{
+  const f=gatedJogFixture(); f.grbl.jog('X',1,250);
+  if(owner==='program') f.socket.receive('workflow:state','running');
+  if(owner==='stop') f.session.stopPhase='holding';
+  f.socket.receive('serialport:read','error:20 (Unsupported command)');
+  const count=stopCommands(f).length;
+  f.tick();
+  assert.equal(stopCommands(f).length,count);
+  assert.equal(f.jobs.size,0);
+  assert.equal(f.session.workflowState,owner==='program'?'running':'idle');
+  assert.equal(f.session.stopPhase,owner==='stop'?'holding':'idle');
+});
+
+test('errors outside owned motion and errors predating a jog do not cancel it',()=>{
+  const f=gatedJogFixture();
+  f.socket.receive('serialport:read','error:20 (Unsupported command)');
+  assert.equal(f.grbl.recoverJogError(),'unchanged');
+  assert.equal(f.jobs.size,0);
+  f.grbl.jog('X',0.04,250); f.tick();
+  assert.equal(f.grbl.jogPhase,'active');
+  assert.equal(stopCommands(f).some(([name])=>name==='jogCancel'),false);
+  f.grbl.clearJog();
 });
