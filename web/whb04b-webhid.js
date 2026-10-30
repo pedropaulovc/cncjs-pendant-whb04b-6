@@ -85,6 +85,8 @@ export class WHB04BWebHID extends EventTarget {
     this._pendingDisplay = null;
     this._displayWriter = null;
     this._displayEpoch = 0;
+    this._deviceClosing = new WeakMap();
+    this._lifecycle = 'active';
     // React to physical plug/unplug of the already-authorised device.
     this._onConnect = (e) => { if (this._matches(e.device) && !this.connected) this._attach(e.device).catch(() => {}); };
     this._onDisconnect = (e) => { if (e.device === this.device) this._teardown(true); };
@@ -122,12 +124,27 @@ export class WHB04BWebHID extends EventTarget {
   }
 
   async _attach(device) {
-    this._displayEpoch++;
+    if (this._lifecycle !== 'active') throw new Error('Pendant is being disconnected.');
+    const epoch = ++this._displayEpoch;
     this.device = device;
+    this.connected = false;
+    await this._deviceClosing.get(device);
+    if (epoch !== this._displayEpoch) throw new Error('Pendant connection was superseded.');
     if (!device.opened) await device.open();
+    if (epoch !== this._displayEpoch) throw new Error('Pendant connection was superseded.');
     device.addEventListener('inputreport', this._onInput);
     this.connected = true;
     this.dispatchEvent(new CustomEvent('attach', { detail: { device } }));
+  }
+
+  _closeDevice(device) {
+    const pending = this._deviceClosing.get(device);
+    if (pending) return pending;
+    // Register before remove listeners can request reconnection.
+    const closing = Promise.resolve().then(() => device.close());
+    this._deviceClosing.set(device, closing);
+    closing.then(() => this._deviceClosing.delete(device), () => {});
+    return closing;
   }
 
   // Tear down the current device. Emits 'remove' when emit=true (physical
@@ -195,8 +212,8 @@ export class WHB04BWebHID extends EventTarget {
             timer = setTimeout(() => {
               // Stop this connection before any further chunks can be sent.
               if (epoch === this._displayEpoch && device === this.device) {
+                this._closeDevice(device).catch(() => {});
                 this._teardown(true);
-                Promise.resolve().then(() => device.close()).catch(() => {});
               }
               reject(new Error('Pendant LCD feature report timed out; reconnect the pendant.'));
             }, 1000);
@@ -213,12 +230,15 @@ export class WHB04BWebHID extends EventTarget {
   }
 
   async destroy() {
+    this._lifecycle = 'destroying';
     const dev = this.device;
+    const closing = dev ? this._closeDevice(dev) : Promise.resolve();
     this._teardown(true);
-    if (dev) { try { await dev.close(); } catch { /* ignore */ } }
+    try { await closing; } catch { /* reconnect will report the close failure */ }
     if (WHB04BWebHID.isSupported()) {
       navigator.hid.removeEventListener('connect', this._onConnect);
       navigator.hid.removeEventListener('disconnect', this._onDisconnect);
     }
+    this._lifecycle = 'active';
   }
 }

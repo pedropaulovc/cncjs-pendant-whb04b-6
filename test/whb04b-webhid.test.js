@@ -156,3 +156,70 @@ test('a stalled feature report times out, closes the connection and rejects queu
   assert.equal(pendant.connected, false);
   assert.equal(closed, 1);
 });
+
+test('timeout reconnect waits for the old close before reopening the same device', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const pendant = new WHB04BWebHID();
+  const calls = [];
+  let finishClose;
+  const device = {
+    vendorId: 0x10ce, productId: 0xeb93,
+    opened: true,
+    removeEventListener() {}, addEventListener() {},
+    sendFeatureReport() { return new Promise(() => {}); },
+    close() {
+      calls.push('close');
+      return new Promise(resolve => { finishClose = () => { device.opened = false; resolve(); }; });
+    },
+    async open() { calls.push('open'); device.opened = true; },
+  };
+  pendant.device = device;
+  pendant.connected = true;
+  Object.defineProperty(navigator, 'hid', { configurable: true, value: { async getDevices() { return [device]; } } });
+  t.after(() => { delete navigator.hid; });
+  let reconnect;
+  pendant.addEventListener('remove', () => { reconnect = pendant.tryReconnect(); });
+  const write = assert.rejects(pendant.sendDisplayData(buildDisplayFrame()), /timed out/);
+  t.mock.timers.tick(1000);
+  await write;
+  assert.deepEqual(calls, ['close']);
+  assert.equal(pendant.connected, false);
+  finishClose();
+  await reconnect;
+  assert.deepEqual(calls, ['close', 'open']);
+  assert.equal(device.opened, true);
+  assert.equal(pendant.connected, true);
+});
+
+test('destroy supersedes an attachment waiting on device close', async () => {
+  const pendant = new WHB04BWebHID();
+  let finishClose;
+  const device = {
+    opened: true,
+    removeEventListener() {}, addEventListener() {},
+    close() { return new Promise(resolve => { finishClose = resolve; }); },
+    async open() { assert.fail('Destroyed attachment must not reopen'); },
+  };
+  const closing = pendant._closeDevice(device);
+  const attach = assert.rejects(pendant._attach(device), /superseded/);
+  await Promise.resolve();
+  const destroying = pendant.destroy();
+  finishClose();
+  await Promise.all([closing, attach, destroying]);
+  assert.equal(pendant.connected, false);
+  assert.equal(pendant.device, null);
+});
+
+test('a newer attachment supersedes a pending attachment', async () => {
+  const pendant = new WHB04BWebHID();
+  let finishOpen;
+  const old = { opened: false, open() { return new Promise(resolve => { finishOpen = resolve; }); }, addEventListener() { assert.fail('Old attachment revived'); } };
+  const current = { opened: true, addEventListener() {} };
+  const stale = assert.rejects(pendant._attach(old), /superseded/);
+  await Promise.resolve();
+  await pendant._attach(current);
+  finishOpen();
+  await stale;
+  assert.equal(pendant.device, current);
+  assert.equal(pendant.connected, true);
+});
