@@ -7,6 +7,7 @@ export class Grbl {
     this.jogPhase = 'idle';
     this.jogGeneration = null;
     this.cancelSequence = 0;
+    this.jogSequence = 0;
     this.spindleDirectionMode = 'M3';
   }
   get state() { return this.session.state || {}; }
@@ -136,6 +137,7 @@ export class Grbl {
     if (this.jogPhase !== 'active') return;
     this.jogPhase = 'idle';
     if (this.jogGeneration !== this.session.generation || this.session.workflowState !== 'idle') return;
+    if (this.activeState === 'Idle' && this.session.reportSequence >= this.jogSequence + 2 && this.session.idleReports >= 2) return;
     this._cmd('feeder:stop');
     if (this._cmd('jogCancel') === 'dropped') return;
     this.cancelSequence = this.session.reportSequence;
@@ -156,6 +158,7 @@ export class Grbl {
     if (result === 'dropped') return result;
     this.jogPhase = 'active';
     this.jogGeneration = this.session.generation;
+    this.jogSequence = this.session.reportSequence;
     return 'sent';
   }
 }

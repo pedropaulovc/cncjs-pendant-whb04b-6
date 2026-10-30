@@ -144,3 +144,11 @@ test('manual controls refuse a running program and unknown spindle state; cooldo
 test('invalid configuration fails without accepting arbitrary macro keys', () => {
   for (const value of [{largeSteps:true},{stepFeed:0},{spindleIncrement:NaN},{macros:[]},{macros:{3:'M3'}},{macros:{1:()=>{}}}]) assert.throws(()=>parseConfig(value));
 });
+
+test('completed Step releases jog ownership so changing mode does not discard the next wheel input', () => {
+  const f=fixture(); f.press(0x0f); f.input({jog:1});
+  f.session.reportSequence+=2; f.session.idleReports=2; f.session.activeState='Idle';
+  f.press(0x0e); f.input({jog:1});
+  assert.equal(f.commands.filter(([c])=>c==='gcode').length,2);
+  assert.equal(f.commands.some(([c])=>c==='jogCancel'),false);
+});
