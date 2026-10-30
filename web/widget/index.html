@@ -42,7 +42,7 @@
     <label class="field">Probe plate mm<input id="thickness" type="number" step="0.01" value="20" /></label>
   </div>
 
-  <div class="grid">
+  <div class="row">Mode: <strong id="mode">mpg</strong></div><div class="grid">
     <div class="card"><div class="label">Key 1</div><div class="value" id="k1">—</div></div>
     <div class="card"><div class="label">Key 2</div><div class="value" id="k2">—</div></div>
     <div class="card"><div class="label">Axis</div><div class="value" id="ld">—</div></div>
@@ -50,6 +50,19 @@
     <div class="card"><div class="label">Jog</div><div class="value" id="jog">0</div></div>
   </div>
 
+  <details>
+    <summary>Pendant settings</summary>
+    <div class="row">
+      <label class="field">Step feed (mm/min)<input id="stepFeed" type="number" min="0.001" step="1" value="250" /></label>
+      <label class="field">Spindle increment (RPM)<input id="spindleIncrement" type="number" min="1" value="100" /></label>
+      <label class="field">5/10 mm steps<select id="largeSteps"><option value="disabled">Disabled</option><option value="enabled">Enabled</option></select></label>
+    </div>
+    <details><summary>Advanced: G-code macros</summary>
+      <p style="font-size:.75rem">JSON slots: 1, 2, 5, 6, 7, 9, 11, 12, 13, 14. Example: {"1":"G0 X0"}. Use \n between lines.</p>
+      <textarea id="config" rows="6" style="width:100%;box-sizing:border-box" aria-label="G-code macros JSON"></textarea>
+    </details>
+    <button id="saveConfig">Save settings</button>
+  </details>
   <h2 style="font-size:.8rem;margin:10px 0 4px">Log</h2>
   <div id="log"></div>
 

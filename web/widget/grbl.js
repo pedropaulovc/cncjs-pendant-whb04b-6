@@ -1,41 +1,235 @@
-const FEED_RATES = {
-  0x0d: 50, 0x0e: 125, 0x0f: 250, 0x10: 750, 0x1a: 1500, 0x1b: 2500, 0x9b: 3000,
-};
-const STEP_DISTANCES = {
-  0x0d: 0.001, 0x0e: 0.01, 0x0f: 0.1, 0x10: 1.0, 0x1a: 10.0, 0x1b: 50.0, 0x9b: 100.0,
-};
-
-const Z_SAFE = -5.0; // Machine-coordinate millimetres; verify against your machine.
-
+// GRBL 1.1 commands through the already-joined CNCjs session.
 export class Grbl {
-  constructor(session, getProbeThickness = () => 20) { this.session = session; this.getProbeThickness = getProbeThickness; }
-  _cmd(directive, data) {
-    this.session.command(directive, data);
+  constructor(session, getProbeThickness = () => 20, log = () => {}, { schedule = (fn, ms) => setTimeout(fn, ms), cancel = id => clearTimeout(id), now = () => performance.now() } = {}) {
+    Object.assign(this, { session, getProbeThickness, log, schedule, cancel, now });
+    this.pendingOverrides = new Map();
+    this.overrideTimer = null;
+    this.jogPhase = 'idle';
+    this.jogGeneration = null;
+    this.jogEpoch = null;
+    this.cancelSequence = 0;
+    this.jogSequence = 0;
+    this.jogPositionSequence = 0;
+    this.jogTimer = null;
+    this.jogTarget = null;
+    this.spindleDirectionMode = 'M3';
   }
-  gcode(g) { this._cmd('gcode', g); }
-  reset() { this._cmd('reset'); }
-  stop() {
-    this.session.stop();
+  get state() { return this.session.state || {}; }
+  get settings() { return this.session.settings?.settings || {}; }
+  get activeState() { return this.session.motionState || this.session.activeState || this.state.status?.activeState || ''; }
+  _cmd(directive, data) { return this.session.command(directive, data); }
+  gcode(g) { return this._cmd('gcode', g); }
+  reset() { this.clearOverrides(); this.clearJog(); this._cmd('reset'); }
+  stop() { this.clearOverrides(); this.clearJog(); this.session.stop(); }
+  refuse(message) { this.log(message); return 'dropped'; }
+  manualReady(allowJog = 'idle-only') {
+    if (this.session.status?.phase !== 'joined' || this.session.stopPhase !== 'idle') return false;
+    if (this.session.workflowState !== 'idle') return false;
+    return this.activeState === 'Idle' || (allowJog === 'allow-jog' && this.activeState === 'Jog');
   }
-  cyclestart() { this._cmd('cyclestart'); }
-  homing() { this._cmd('homing'); }
-  spindleOff() { this.gcode('M5'); }
-  safeZ() { this.gcode(`G21 G53 G0 G90 Z${Z_SAFE}`); }
-  wcsHome() { this.safeZ(); this.gcode('G21 G54 G0 G90 X0 Y0'); }
+  startPause() {
+    if (this.session.workflowState === 'running') return this._cmd('gcode:pause');
+    if (this.session.workflowState === 'paused') return this._cmd('gcode:resume');
+    if (this.activeState.startsWith('Hold')) return this._cmd('cyclestart');
+    if (this.manualReady()) return this._cmd('gcode:start');
+    return this.refuse('Start/Pause: wait for a known idle, running, or paused state.');
+  }
+  clearOverrides() {
+    if (this.overrideTimer !== null) this.cancel(this.overrideTimer);
+    this.overrideTimer = null;
+    this.pendingOverrides.clear();
+  }
+  overrideTarget(kind, target) {
+    const current = this.pendingOverrides.get(kind)?.target ?? this.session.overrides?.[kind === 'feed' ? 0 : 2];
+    if (!Number.isFinite(target) || !Number.isFinite(current)) return this.refuse('Override: waiting for GRBL Ov status.');
+    const bounded = Math.max(10, Math.min(200, target));
+    if (bounded !== target) this.log(`GRBL override minimum is 10%; requested ${target}% uses ${bounded}%.`);
+    return this.override(kind, bounded - current);
+  }
+  override(kind, delta) {
+    if (!['feed', 'spindle'].includes(kind) || !Number.isInteger(delta) || Math.abs(delta) > 200) return 'dropped';
+    if (this.session.status?.phase !== 'joined' || this.session.stopPhase !== 'idle') return this.refuse('Override: no ready GRBL connection.');
+    const current = this.session.overrides?.[kind === 'feed' ? 0 : 2];
+    if (!Number.isFinite(current)) { this._cmd('statusreport'); return this.refuse('Override: waiting for GRBL Ov status.'); }
+    let pending = this.pendingOverrides.get(kind);
+    if (pending?.generation !== this.session.generation || pending?.epoch !== this.session.motionEpoch) pending = null;
+    if (!pending) pending = { target: current, expected: null, generation: this.session.generation, epoch: this.session.motionEpoch, deadline: this.now() + 3000 };
+    pending.target = Math.max(10, Math.min(200, pending.target + delta));
+    this.pendingOverrides.set(kind, pending);
+    this.flushOverrides();
+    return 'sent';
+  }
+  flushOverrides() {
+    if (this.overrideTimer !== null) this.cancel(this.overrideTimer);
+    this.overrideTimer = null;
+    for (const [kind, pending] of this.pendingOverrides) {
+      if (pending.generation !== this.session.generation || pending.epoch !== this.session.motionEpoch || this.session.status?.phase !== 'joined' || this.session.stopPhase !== 'idle') {
+        this.pendingOverrides.delete(kind);
+        continue;
+      }
+      if (this.now() >= pending.deadline) {
+        this.pendingOverrides.delete(kind);
+        this.log(`${kind} override: no confirming status; remaining changes discarded.`);
+        continue;
+      }
+      const current = this.session.overrides?.[kind === 'feed' ? 0 : 2];
+      if (pending.expected !== null && (this.session.overrideSequence <= pending.sequence || current !== pending.expected)) continue;
+      if (current === pending.target) { this.pendingOverrides.delete(kind); continue; }
+      const difference = pending.target - current;
+      const amount = Math.sign(difference) * (Math.abs(difference) >= 10 ? 10 : 1);
+      if (this._cmd(`${kind}Override`, amount) === 'dropped') { this.pendingOverrides.delete(kind); continue; }
+      pending.expected = current + amount;
+      pending.sequence = this.session.overrideSequence;
+      pending.deadline = this.now() + 3000;
+    }
+    if (!this.pendingOverrides.size) return;
+    this._cmd('statusreport');
+    this.overrideTimer = this.schedule(() => this.flushOverrides(), 250);
+  }
+  homing() {
+    if (!this.manualReady() && this.activeState !== 'Alarm') return this.refuse('Homing: stop the program and motion first.');
+    return this._cmd('homing');
+  }
+  macro(code) {
+    if (!this.manualReady()) return this.refuse('Macro: controller must be idle with no running program.');
+    return this.gcode(code);
+  }
+  spindleToggle() {
+    if (!this.manualReady()) return this.refuse('Spindle toggle: controller must be idle.');
+    const modal = this.state.parserstate?.modal?.spindle;
+    if (modal === 'M3' || modal === 'M4') return this.gcode('M5');
+    const rpm = Number(this.state.parserstate?.spindle);
+    if (modal !== 'M5' || !(rpm > 0)) return this.refuse('Set a positive spindle S speed in CNCjs before starting the spindle.');
+    return this.gcode(this.spindleDirectionMode);
+  }
+  spindleSpeed(direction, increment = 100) {
+    if (!this.manualReady()) return this.refuse('Commanded spindle speed: controller must be idle; use Spindle +/- overrides during a program.');
+    const current = Number(this.state.parserstate?.spindle);
+    const max = Number(this.settings.$30), min = Number(this.settings.$31);
+    if (!Number.isFinite(current) || !Number.isFinite(min) || !(max > min)) return this.refuse('Spindle speed unavailable: wait for GRBL parser state and $30/$31 settings.');
+    return this.gcode(`S${Math.max(min, Math.min(max, current + direction * increment))}`);
+  }
+  spindleDirection() {
+    if (!this.manualReady() || this.state.parserstate?.modal?.spindle !== 'M5') return this.refuse('Stop the spindle before changing its direction.');
+    this.spindleDirectionMode = this.spindleDirectionMode === 'M3' ? 'M4' : 'M3';
+    this.log(`Next spindle start: ${this.spindleDirectionMode === 'M3' ? 'clockwise' : 'counterclockwise'}.`);
+  }
+  coolantToggle(kind) {
+    if (!this.manualReady()) return this.refuse('Coolant toggle: controller must be idle.');
+    const modal = this.state.parserstate?.modal?.coolant;
+    if (!modal) return this.refuse('Coolant state unavailable.');
+    const modes = new Set(Array.isArray(modal) ? modal : [modal]);
+    const target = kind === 'flood' ? 'M8' : 'M7';
+    if (!modes.has(target)) return this.gcode(target);
+    modes.delete(target);
+    // GRBL has one coolant-off command; restore the other active channel.
+    return this.gcode(['M9', ...[...modes].filter(mode => mode === 'M7' || mode === 'M8')]);
+  }
+  safeZ() { return this.macro('G21 G53 G0 G90 Z-5'); }
+  wcsHome() { return this.macro(['G21 G53 G0 G90 Z-5', 'G21 G54 G0 G90 X0 Y0']); }
   probeZ() {
-    const dz = Number(this.getProbeThickness()) + 0.001;
-    this.gcode('G21 G91');
-    this.gcode('G38.2 Z-50 F120');
-    this.gcode(`G10 L20 P1 Z${dz}`);
-    this.gcode('G0 Z3');
-    this.gcode('G90');
+    const thickness = Number(this.getProbeThickness());
+    if (!Number.isFinite(thickness) || thickness < 0) return this.refuse('Enter a valid nonnegative probe plate thickness.');
+    return this.macro(['G21 G91', 'G38.2 Z-50 F120', `G10 L20 P1 Z${thickness + 0.001}`, 'G0 Z3', 'G90']);
   }
-  jog(axis, signedDetents, rightCode) {
-    const step = STEP_DISTANCES[rightCode] ?? 0.1;
-    const feed = FEED_RATES[rightCode] ?? 500;
-    const dist = (signedDetents * step).toFixed(4);
-    this.gcode(`$J=G21 G91 ${axis}${dist} F${feed}`);
+  maxRate(axis) {
+    const index = ['X', 'Y', 'Z'].indexOf(axis);
+    const value = Number(this.settings[`$${110 + index}`]);
+    return index >= 0 && Number.isFinite(value) && value > 0 ? value : null;
+  }
+  position(axis) {
+    const report = this.session.positionReport;
+    const units = Number(report?.units);
+    if (!report || ![0, 1].includes(units)) return null;
+    const value = report.values[['X', 'Y', 'Z'].indexOf(axis)];
+    if (!Number.isFinite(value)) return null;
+    const scale = units === 1 ? 25.4 : 1;
+    const stepsPerMm = Number(this.settings[`$${100 + ['X', 'Y', 'Z'].indexOf(axis)}`]);
+    const stepRounding = Number.isFinite(stepsPerMm) && stepsPerMm > 0 ? 0.5 / stepsPerMm : 0;
+    return { kind: report.kind, units, value: value * scale, resolution: report.resolution * scale + stepRounding, sequence: report.sequence };
+  }
+  jogCompleted() {
+    if (this.activeState !== 'Idle') return false;
+    if (!this.jogTarget) return this.session.reportSequence >= this.jogSequence + 2 && this.session.idleReports >= 2;
+    const position = this.position(this.jogTarget.axis);
+    if (!position || position.sequence <= this.jogPositionSequence || position.kind !== this.jogTarget.kind || position.units !== this.jogTarget.units) return false;
+    const tolerance = Math.max(position.resolution, this.jogTarget.resolution) + 1e-8;
+    // A stale Idle report at the starting point cannot confirm completion.
+    if (Math.abs(position.value - this.jogTarget.start) < tolerance) {
+      // A tiny Step can round to no visible travel. Continuous rejects such
+      // segments before sending; Step still needs to release its status poller.
+      return Math.abs(this.jogTarget.value - this.jogTarget.start) <= 2 * tolerance
+        && this.session.reportSequence >= this.jogSequence + 2 && this.session.idleReports >= 2;
+    }
+    return Math.abs(position.value - this.jogTarget.value) <= tolerance;
+  }
+  clearJog() {
+    if (this.jogTimer !== null) this.cancel(this.jogTimer);
+    this.jogTimer = null;
+    this.jogPhase = 'idle';
+    this.jogTarget = null;
+  }
+  jogSessionChanged() {
+    return this.jogGeneration !== this.session.generation || this.jogEpoch !== this.session.motionEpoch;
+  }
+  cancellationCompleted() {
+    return this.session.reportSequence >= this.cancelSequence + 2 && this.session.idleReports >= 2 && this.activeState === 'Idle';
+  }
+  pollJog() {
+    if (this.jogTimer !== null) return;
+    this.jogTimer = this.schedule(() => {
+      this.jogTimer = null;
+      if (this.jogSessionChanged() || this.session.status?.phase !== 'joined' || this.session.stopPhase !== 'idle' || this.session.workflowState !== 'idle' || ['Alarm', 'Sleep', 'Check'].includes(this.activeState)) { this.clearJog(); return; }
+      if (this.jogPhase === 'idle' || (this.jogPhase === 'active' && this.jogCompleted()) || (this.jogPhase === 'canceling' && this.cancellationCompleted())) { this.clearJog(); return; }
+      this._cmd('statusreport');
+      this.pollJog();
+    }, 100);
+  }
+  cancelJog() {
+    if (this.jogPhase !== 'active') return;
+    this.jogPhase = 'idle';
+    if (this.jogSessionChanged() || this.session.workflowState !== 'idle' || this.jogCompleted()) { this.clearJog(); return; }
+    this._cmd('feeder:stop');
+    if (this._cmd('jogCancel') === 'dropped') return;
+    this.cancelSequence = this.session.reportSequence;
+    this.jogPhase = 'canceling';
+    this._cmd('statusreport');
+    this.pollJog();
+  }
+  jogPulse(axis, distance, feed) {
+    if (this.jogSessionChanged()) this.clearJog();
+    if (this.jogPhase === 'active' && this.jogGeneration === this.session.generation) {
+      if (!this.jogCompleted()) return 'pending';
+      this.jogPhase = 'idle';
+    }
+    const position = this.position(axis);
+    if (!position || Math.abs(distance) <= 2 * position.resolution) {
+      this._cmd('statusreport');
+      return this.refuse('Continuous: waiting for position units/feedback, or selected travel is below report resolution.');
+    }
+    return this.jog(axis, distance, feed);
+  }
+  jog(axis, distance, feed) {
+    if (!['X', 'Y', 'Z'].includes(axis) || !Number.isFinite(distance) || Math.abs(distance) < 0.00005 || !Number.isFinite(feed) || !(feed > 0)) return this.refuse('Jog requires an XYZ axis and finite distance/feed.');
+    if (this.jogSessionChanged()) this.clearJog();
+    if (this.jogPhase === 'canceling') {
+      if (!this.cancellationCompleted()) return this.refuse('Jog: waiting for cancellation to finish.');
+      this.jogPhase = 'idle';
+    }
+    if (!this.manualReady('allow-jog')) return this.refuse('Jog: controller must be idle or jogging with no running program.');
+    const max = this.maxRate(axis);
+    if (!max) return this.refuse(`Jog: waiting for GRBL ${axis} maximum-rate setting.`);
+    const position = this.position(axis);
+    const previous = this.jogPhase === 'active' && !this.jogCompleted() && this.jogTarget?.axis === axis ? this.jogTarget : position;
+    const result = this.gcode(`$J=G21 G91 ${axis}${distance.toFixed(4)} F${Math.min(feed, max).toFixed(3)}`);
+    if (result === 'dropped') return result;
+    this.jogPhase = 'active';
+    this.jogGeneration = this.session.generation;
+    this.jogEpoch = this.session.motionEpoch;
+    this.jogSequence = this.session.reportSequence;
+    this.jogPositionSequence = this.session.positionReport?.sequence ?? 0;
+    this.jogTarget = previous ? { ...previous, axis, start: position?.value ?? previous.start, value: previous.value + Number(distance.toFixed(4)) } : null;
+    this.pollJog();
+    return 'sent';
   }
 }
-
-

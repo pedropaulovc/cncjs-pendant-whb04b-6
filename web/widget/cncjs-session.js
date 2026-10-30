@@ -10,6 +10,18 @@ export class CncjsSession {
     this.stopPort = null;
     this.holdRequest = 'not-requested';
     this.workflowState = 'unknown';
+    this.state = {};
+    this.settings = {};
+    this.reportSequence = 0;
+    this.idleReports = 0;
+    this.overrideSequence = 0;
+    this.overrides = [];
+    this.positionReport = null;
+    this.positionSequence = 0;
+    this.statePositionSignature = '';
+    this.motionState = '';
+    this.motionEpoch = 0;
+    this.activeState = '';
     this.selection = 'automatic';
     this.selectedPort = null;
     this.generation = 0;
@@ -27,6 +39,14 @@ export class CncjsSession {
     this.cancelStopPolling();
     if (this.stopPhase !== 'idle') this.stopPhase = 'interrupted';
     this.workflowState = 'unknown';
+    this.state = {};
+    this.settings = {};
+    this.activeState = '';
+    this.overrides = [];
+    this.positionReport = null;
+    this.statePositionSignature = '';
+    this.motionState = '';
+    this.idleReports = 0;
     this.generation += 1;
     this.pendingPort = null;
     this.status.port = null;
@@ -86,14 +106,63 @@ export class CncjsSession {
       this.status.controller = info.controllerType;
     });
     on('controller:state', (type, state) => {
-      if (type === 'Grbl') this.onState(type, state);
+      if (type !== 'Grbl') return;
+      this.state = state;
+      const status = state?.status || {};
+      const kind = status.mpos ? 'MPos' : 'WPos';
+      const position = status.mpos || status.wpos;
+      const words = ['x', 'y', 'z'].map(axis => position?.[axis]);
+      const signature = JSON.stringify([status.activeState, ...words]);
+      if (signature !== this.statePositionSignature && words.every(value => value !== undefined)) {
+        this.statePositionSignature = signature;
+        this.recordPosition(kind, words.map(String), status.activeState);
+      }
+      if (Array.isArray(state?.status?.ov) && state.status.ov.length === 3) this.overrides = state.status.ov.map(Number);
+      this.onState(type, state);
+    });
+    on('controller:settings', (type, settings) => {
+      if (type === 'Grbl') this.settings = settings;
     });
     on('workflow:state', state => {
       if ((this.pendingPort || this.status.port) && ['idle', 'running', 'paused'].includes(state)) this.workflowState = state;
     });
-    on('serialport:read', line => this.stopReport(line));
+    on('serialport:read', line => {
+      if (typeof line === 'string' && line.startsWith('Grbl ')) {
+        this.motionEpoch += 1;
+        this.motionState = '';
+        this.activeState = '';
+        this.positionReport = null;
+        this.overrides = [];
+        this.statePositionSignature = '';
+        this.state = {};
+      }
+      const state = typeof line === 'string' ? /^<([^|>]+)/.exec(line)?.[1] : null;
+      if (state) {
+        this.activeState = state;
+        this.motionState = state;
+        this.reportSequence += 1;
+        this.idleReports = state === 'Idle' ? this.idleReports + 1 : 0;
+      }
+      const position = typeof line === 'string' ? /\|(MPos|WPos):([^|>]+)/.exec(line) : null;
+      if (position) {
+        const words = position[2].split(',').slice(0, 3);
+        this.recordPosition(position[1], words, state);
+      }
+      const overrides = typeof line === 'string' ? /\|Ov:(\d+),(\d+),(\d+)/.exec(line) : null;
+      if (overrides) { this.overrides = overrides.slice(1).map(Number); this.overrideSequence += 1; }
+      this.stopReport(line);
+    });
     on('serialport:list', (ports) => this.join(ports));
     this.timer = this.schedule(() => this.discover(), 2000);
+  }
+
+  recordPosition(kind, words, activeState) {
+    const values = words.map(Number);
+    if (!activeState || words.length !== 3 || !values.every(Number.isFinite)) return;
+    this.motionState = activeState;
+    this.positionReport = { kind, values, sequence: ++this.positionSequence,
+      units: this.settings.settings?.$13,
+      resolution: Math.max(...words.map(word => 10 ** -(word.split('.')[1]?.length || 0))) };
   }
 
   join(ports) {
@@ -138,13 +207,13 @@ export class CncjsSession {
   command(directive, data) {
     if (!this.socket?.connected || this.status.phase !== 'joined') {
       this.update(this.status.phase, 'Command dropped: no joined GRBL controller.');
-      return;
+      return 'dropped';
     }
     if (this.stopPhase !== 'idle' && !['reset', 'statusreport'].includes(directive)) {
       this.update('joined', this.stopPhase === 'interrupted'
         ? 'Command dropped: Stop interrupted; inspect CNCjs, then press Stop or Reset to recover.'
         : 'Command dropped: Stop is waiting for the controller.');
-      return;
+      return 'dropped';
     }
     if (this.stopPhase !== 'idle' && directive === 'reset') {
       if (this.stopPort !== this.status.port) this.stopIntent = 'motion';
@@ -154,6 +223,7 @@ export class CncjsSession {
       this.startStopPolling();
     }
     this.socket.emit('command', this.status.port, directive, data);
+    return 'sent';
   }
 
   stop() {

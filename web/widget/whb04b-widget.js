@@ -17,21 +17,11 @@
 // client version always matches the CNCjs server (2.x).
 
 import {
-  WHB04BWebHID, buildDisplayFrame, JogMode,
+  WHB04BWebHID, buildDisplayFrame, JogMode, CoordinateSystem,
 } from '../whb04b-webhid.js';
 import { CncjsSession, isParentMessage } from './cncjs-session.js';
 import { Grbl } from './grbl.js';
-
-//---------------------------------------------------------------------------
-// Pendant input codes
-//---------------------------------------------------------------------------
-const AXIS_BY_CODE = { 0x11: 'X', 0x12: 'Y', 0x13: 'Z', 0x14: 'A', 0x15: 'B', 0x16: 'C' };
-
-// key byte codes -> action name (grbl)
-const RESET = 0x01, STOP = 0x02, START = 0x03, MHOME = 0x08, SAFEZ = 0x09,
-  WHOME = 0x0a, SPINDLE = 0x0b, PROBEZ = 0x0d, CONT = 0x0e, STEP = 0x0f;
-
-let zProbeThickness = 20.0;   // touch-plate thickness (mm)
+import { PendantControls, CONFIG_KEY, parseConfig } from './pendant-controls.js';
 
 //---------------------------------------------------------------------------
 // Credential + context acquisition from the parent frame
@@ -89,12 +79,13 @@ function setPill(id, on, text) {
 //---------------------------------------------------------------------------
 // Main
 //---------------------------------------------------------------------------
-let jogMode = JogMode.Step;
+let jogMode = JogMode.None;
 const pendant = new WHB04BWebHID();
 const session = new CncjsSession({
   io: (...args) => io(...args),
   origin: location.origin,
   onStatus(status) {
+    if (status.phase !== 'joined') { controls.suspend(); grbl.clearOverrides(); grbl.clearJog(); }
     ctx.port = status.port;
     setPill('sockPill', status.phase === 'joined', status.phase);
     refreshCtxUI();
@@ -102,7 +93,16 @@ const session = new CncjsSession({
   },
   onState: onControllerState,
 });
-const grbl = new Grbl(session, () => zProbeThickness);
+const grbl = new Grbl(session, () => $('thickness')?.valueAsNumber ?? NaN, log);
+const controls = new PendantControls(grbl, {
+  log,
+  onMode(mode) {
+    jogMode = { step: JogMode.Step, continuous: JogMode.Continuous }[mode] ?? JogMode.None;
+    $('mode').textContent = mode;
+    onControllerState('Grbl', session.state);
+  },
+  onCoordinates() { onControllerState('Grbl', session.state); },
+});
 
 function refreshCtxUI() {
   setPill('tokenPill', !!ctx.token, ctx.token ? 'token ✓' : 'no token');
@@ -118,44 +118,18 @@ function connectSocket() {
 // Push live machine coordinates / feed to the pendant LCD.
 function onControllerState(type, state) {
   const st = state?.status || {};
-  const pos = st.wpos || st.mpos || {};
+  const pos = (controls.coordinates === 'machine' ? st.mpos : st.wpos) || {};
   const x = Number(pos.x) || 0, y = Number(pos.y) || 0, z = Number(pos.z) || 0;
   const feed = Number(st.feedrate) || 0;
   const spindle = Number(st.spindle) || 0;
   if (pendant.connected) {
-    pendant.sendDisplayData(buildDisplayFrame({ jogMode, x, y, z, feedRate: feed, spindleRate: spindle }))
+    pendant.sendDisplayData(buildDisplayFrame({ jogMode, coordinateSystem: controls.coordinates === 'work' ? CoordinateSystem.X1Y1Z1 : CoordinateSystem.XYZ, x, y, z, feedRate: feed, spindleRate: spindle }))
       .catch(() => { /* device may be busy */ });
   }
 }
 
 function handleInput(d) {
-  // buttons
-  const onKey = (code) => {
-    switch (code) {
-      case RESET: grbl.reset(); break;
-      case STOP: grbl.stop(); break;
-      case START: grbl.cyclestart(); break;
-      case MHOME: grbl.homing(); break;
-      case SAFEZ: grbl.safeZ(); break;
-      case WHOME: grbl.wcsHome(); break;
-      case SPINDLE: grbl.spindleOff(); break;
-      case PROBEZ: grbl.probeZ(); break;
-      case CONT: jogMode = JogMode.Continuous; log('Jog mode: continuous'); break;
-      case STEP: jogMode = JogMode.Step; log('Jog mode: step'); break;
-      default: break;
-    }
-  };
-  if (d.firstKeyCode) onKey(d.firstKeyCode);
-  if (d.secondKeyCode) onKey(d.secondKeyCode);
-
-  // jog wheel
-  if (d.jog !== 0) {
-    const axis = AXIS_BY_CODE[d.leftDialCode];
-    if (axis) {
-      // continuous spins the same jog faster (higher feed dial behaviour)
-      grbl.jog(axis, d.jog, d.rightDialCode);
-    }
-  }
+  if (!document.hidden) controls.handleInput(d);
 
   // mirror to UI
   $('k1').textContent = d.firstKey; $('k2').textContent = d.secondKey;
@@ -169,8 +143,21 @@ function wireUI() {
     catch (err) { log('Pendant error: ' + err.message); }
   };
   $('reconnectSock').onclick = () => { readParentStore(); refreshCtxUI(); connectSocket(); };
-  const thick = $('thickness');
-  if (thick) thick.onchange = () => { zProbeThickness = parseFloat(thick.value) || 20; };
+  const config = $('config');
+  try { controls.setConfig(parseConfig(JSON.parse(localStorage.getItem(CONFIG_KEY) || '{}'))); }
+  catch (error) { log(`Pendant settings: ${error.message}`); }
+  config.value = JSON.stringify(controls.config.macros, null, 2);
+  $('stepFeed').value = controls.config.stepFeed;
+  $('spindleIncrement').value = controls.config.spindleIncrement;
+  $('largeSteps').value = controls.config.largeSteps;
+  $('saveConfig').onclick = () => {
+    try {
+      const value = parseConfig({ macros: JSON.parse(config.value), stepFeed: Number($('stepFeed').value), spindleIncrement: Number($('spindleIncrement').value), largeSteps: $('largeSteps').value });
+      controls.setConfig(value);
+      localStorage.setItem(CONFIG_KEY, JSON.stringify(value));
+      log('Pendant settings saved for this browser and CNCjs address.');
+    } catch (error) { log(`Pendant settings: ${error.message}`); }
+  };
 }
 
 function boot() {
@@ -181,7 +168,7 @@ function boot() {
   refreshCtxUI();
 
   pendant.addEventListener('attach', () => { setPill('hidPill', true, 'pendant ✓'); log('Pendant connected.'); });
-  pendant.addEventListener('remove', () => { setPill('hidPill', false, 'pendant ✗'); log('Pendant removed.'); });
+  pendant.addEventListener('remove', () => { controls.suspend(); grbl.clearOverrides(); controls.keys.clear(); setPill('hidPill', false, 'pendant ✗'); log('Pendant removed.'); });
   pendant.addEventListener('use', (e) => handleInput(e.detail));
 
   // Re-attach to an already-authorised pendant without a prompt.
@@ -197,5 +184,6 @@ function boot() {
 }
 
 document.addEventListener('DOMContentLoaded', boot);
-window.addEventListener('pagehide', () => session.disconnect());
+window.addEventListener('pagehide', () => { controls.suspend(); grbl.clearOverrides(); grbl.clearJog(); session.disconnect(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) controls.suspend(); });
 

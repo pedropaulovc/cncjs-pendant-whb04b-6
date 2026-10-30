@@ -24,7 +24,7 @@ export const KeyPressed = {
 
 export const RightDial = {
   0x0d: '2% / 0.001', 0x0e: '5% / 0.01', 0x0f: '10% / 0.1',
-  0x10: '30% / 1', 0x1a: '60% / 10', 0x1b: '100% / 50', 0x9b: 'Lead',
+  0x10: '30% / 1', 0x1a: '60% / 5', 0x1b: '100% / 10', 0x1c: 'Lead', 0x9b: 'Lead',
 };
 
 export const LeftDial = {
