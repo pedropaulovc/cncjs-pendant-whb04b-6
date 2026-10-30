@@ -20,7 +20,7 @@ export class SavedMacroRunner {
     const port = this.session.status.port;
     try {
       const record = await this.library.read(id);
-      if (intent !== this.intent) return 'dropped';
+      if (intent !== this.intent) { this.log('Saved macro request canceled.'); return 'dropped'; }
       if (generation !== this.session.generation || motionEpoch !== this.session.motionEpoch
         || workflowEpoch !== this.session.workflowEpoch || port !== this.session.status.port
         || !this.grbl.manualReady() || this.grbl.jogPhase !== 'idle') {
