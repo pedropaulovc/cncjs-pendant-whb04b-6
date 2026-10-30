@@ -36,7 +36,7 @@ function validateExpression(expression, line) {
   // comments. A parse failure cannot read a bound; let CNCjs handle that text.
   catch { return; }
   const name = findBounds(ast);
-  if (name) throw new Error(`Macro line ${line} uses ${name}, a program-bound variable unavailable to the pendant. Run this macro from the CNCjs Macro widget.`);
+  if (name) throw new Error(`Macro line ${line} uses ${name}, a program-bound variable unavailable to the pendant. Save and run this code in the CNCjs Macro widget.`);
 }
 
 function findBounds(node) {

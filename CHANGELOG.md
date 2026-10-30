@@ -10,6 +10,10 @@ All notable changes to this project are documented here.
 - Linked macro definitions refreshed from CNCjs, with missing-macro and request-error feedback.
 - Cancellation checks for macro loading and validation of expressions that require unavailable Visualizer bounds.
 
+### Changed
+
+- Custom G-code using Visualizer bounds is now refused on button press, including existing assignments. Settings retain the code for editing and show an inline explanation.
+
 ## [3.0.1] - 2026-10-30
 
 ### Fixed
