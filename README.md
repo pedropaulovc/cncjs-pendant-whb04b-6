@@ -113,7 +113,8 @@ Stop waits for GRBL 1.1 to report a completed hold (`Hold:0`) before resetting
 programmed motion. It leaves an idle controller idle. Pendant motion commands
 stay blocked until the controller confirms the stop; inspect CNCjs if status
 updates stop arriving. Reset remains available. Follow the controller's
-unlock/homing procedure after a reset. These software controls depend on the
+unlock/homing procedure after a reset. Stop at Idle or during jogging does not
+switch off the spindle. These software controls depend on the
 browser and serial connection and do not replace a wired emergency stop.
 
 ## How it works
