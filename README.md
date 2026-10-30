@@ -55,19 +55,31 @@ the `~/.cncrc` secret.
 
    ```bash
    # installed package
-   cncjs --mount /whb04b:/path/to/node_modules/cncjs-pendant-whb04b-6/web/widget
+   cncjs --mount /whb04b:/path/to/node_modules/cncjs-pendant-whb04b-6/web
 
    # local checkout
-   cncjs --mount /whb04b:/path/to/cncjs-pendant-whb04b-6/web/widget
+   cncjs --mount /whb04b:/path/to/cncjs-pendant-whb04b-6/web
    ```
 
 2. In the CNCjs UI: **Manage Widgets → add a custom widget**, set the URL to
-   `/whb04b/index.html`.
+   `/whb04b/widget/index.html`. Mount the whole `web` folder because the widget
+   imports the driver from its parent directory.
 3. Open the widget and click **Connect pendant** once to grant WebHID access.
 
 The widget reads the CNCjs token and active serial port from the parent frame,
 maps the pendant's keys, dials, and jog wheel to grbl commands, and mirrors the
 machine coordinates to the pendant LCD.
+
+Open the machine port in CNCjs first. The widget joins the selected open port,
+or the sole open port if CNCjs has not supplied a selection. With several open
+ports it waits for an explicit selection. It reconnects after a network drop
+and discards pendant commands while disconnected instead of queuing them.
+
+Jog distances and feed rates are always millimetres. Safe-Z moves to machine
+Z = -5 mm; W-Home uses that move before travelling to G54 X0 Y0. Verify that
+height against your machine and workholding before using either key. Probe-Z
+travels up to 50 mm downward at 120 mm/min and uses the widget's plate thickness
+field (20 mm by default). These macros select G21 and leave the controller in mm.
 
 ## Use the standalone tester
 
@@ -106,8 +118,9 @@ size and feed rate, and the wheel jogs.
   `?token=` query param, the parent's `postMessage` (which also supplies the
   active port), or a same-origin read of `localStorage['cnc']`.
 - **Commands** — it loads same-origin `socket.io` and emits
-  `command/<port>` against the already-open serial port; it does not open or
-  close the port itself.
+  `command` with the active port against the already-open serial port. CNCjs's
+  `open` socket RPC joins that controller and supplies its initial state. The
+  widget only requests ports reported as in use; it never sends a close command.
 
 ## Notes
 

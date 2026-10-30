@@ -19,34 +19,28 @@
 import {
   WHB04BWebHID, buildDisplayFrame, JogMode,
 } from '../whb04b-webhid.js';
+import { CncjsSession, isParentMessage } from './cncjs-session.js';
+import { Grbl } from './grbl.js';
 
 //---------------------------------------------------------------------------
-// grbl feed rates / step distances per right-dial code (from whb04b_actions)
+// Pendant input codes
 //---------------------------------------------------------------------------
-const FEED_RATES = {
-  0x0d: 50, 0x0e: 125, 0x0f: 250, 0x10: 750, 0x1a: 1500, 0x1b: 2500, 0x9b: 3000,
-};
-const STEP_DISTANCES = {
-  0x0d: 0.001, 0x0e: 0.01, 0x0f: 0.1, 0x10: 1.0, 0x1a: 10.0, 0x1b: 50.0, 0x9b: 100.0,
-};
 const AXIS_BY_CODE = { 0x11: 'X', 0x12: 'Y', 0x13: 'Z', 0x14: 'A', 0x15: 'B', 0x16: 'C' };
 
 // key byte codes -> action name (grbl)
 const RESET = 0x01, STOP = 0x02, START = 0x03, MHOME = 0x08, SAFEZ = 0x09,
   WHOME = 0x0a, SPINDLE = 0x0b, PROBEZ = 0x0d, CONT = 0x0e, STEP = 0x0f;
 
-const Z_SAFE = -5.0;          // machine Z deemed safe to travel
 let zProbeThickness = 20.0;   // touch-plate thickness (mm)
 
 //---------------------------------------------------------------------------
 // Credential + context acquisition from the parent frame
 //---------------------------------------------------------------------------
-const ctx = { token: null, host: '', port: null, controller: 'Grbl' };
+const ctx = { token: null, port: null, controller: 'Grbl' };
 
 function readQuery() {
   const q = new URLSearchParams(location.search);
   if (q.get('token')) ctx.token = q.get('token');
-  if (q.get('host')) ctx.host = q.get('host');
 }
 
 function readParentStore() {
@@ -61,51 +55,20 @@ function readParentStore() {
 // The parent posts { token, version, action:{ type, payload } } into the iframe.
 function listenParentMessages(onChange) {
   window.addEventListener('message', (e) => {
+    if (!isParentMessage(e, window.parent, location.origin)) return;
     const msg = e.data || {};
-    if (msg.token) ctx.token = msg.token;
+    if (msg.token && msg.token !== ctx.token) {
+      ctx.token = msg.token;
+      connectSocket();
+    }
     const action = msg.action || {};
     if (action.type === 'change') {
       const p = action.payload || {};
-      if (p.port) ctx.port = p.port;
+      if (Object.hasOwn(p, 'port')) session.selectPort(p.port);
       if (p.controller) ctx.controller = p.controller;
       onChange?.();
     }
   });
-}
-
-//---------------------------------------------------------------------------
-// grbl command sender over the CNCjs socket (reusing the app's open port)
-//---------------------------------------------------------------------------
-class Grbl {
-  constructor(getSocket, getPort) { this._socket = getSocket; this._port = getPort; }
-  _cmd(directive, data) {
-    const s = this._socket();
-    const port = this._port();
-    if (!s || !port) { log(`drop (${!s ? 'no socket' : 'no port'}): ${directive} ${data ?? ''}`); return; }
-    s.emit('command', port, directive, data);
-  }
-  gcode(g) { this._cmd('gcode', g); }
-  reset() { this._cmd('reset'); }
-  stop() { this._cmd('stop'); }
-  cyclestart() { this._cmd('cyclestart'); }
-  homing() { this._cmd('homing'); }
-  spindleOff() { this.gcode('M5'); }
-  safeZ() { this.gcode(`G53 G0 G90 Z${Z_SAFE}`); }
-  wcsHome() { this.safeZ(); this.gcode('G54 G0 G90 X0 Y0'); }
-  probeZ() {
-    const dz = Number(zProbeThickness) + 0.001;
-    this.gcode('G91');
-    this.gcode('G38.2 Z-50 F120');
-    this.gcode(`G10 L20 P1 Z${dz}`);
-    this.gcode('G0 Z3');
-    this.gcode('G90');
-  }
-  jog(axis, signedDetents, rightCode) {
-    const step = STEP_DISTANCES[rightCode] ?? 0.1;
-    const feed = FEED_RATES[rightCode] ?? 500;
-    const dist = (signedDetents * step).toFixed(4);
-    this.gcode(`$J=G91 ${axis}${dist} F${feed}`);
-  }
 }
 
 //---------------------------------------------------------------------------
@@ -126,10 +89,20 @@ function setPill(id, on, text) {
 //---------------------------------------------------------------------------
 // Main
 //---------------------------------------------------------------------------
-let socket = null;
 let jogMode = JogMode.Step;
 const pendant = new WHB04BWebHID();
-const grbl = new Grbl(() => socket, () => ctx.port);
+const grbl = new Grbl({ command: (...args) => session.command(...args) }, () => zProbeThickness);
+const session = new CncjsSession({
+  io: (...args) => io(...args),
+  origin: location.origin,
+  onStatus(status) {
+    ctx.port = status.port;
+    setPill('sockPill', status.phase === 'joined', status.phase);
+    refreshCtxUI();
+    if (status.detail) log(status.detail);
+  },
+  onState: onControllerState,
+});
 
 function refreshCtxUI() {
   setPill('tokenPill', !!ctx.token, ctx.token ? 'token ✓' : 'no token');
@@ -139,13 +112,7 @@ function refreshCtxUI() {
 function connectSocket() {
   if (!ctx.token) { log('No token from parent frame; cannot connect socket.'); return; }
   if (typeof io === 'undefined') { log('socket.io client not loaded (open inside CNCjs).'); return; }
-  // Same-origin connect; ctx.host is normally empty when mounted in CNCjs.
-  socket = io(ctx.host || undefined, { query: `token=${ctx.token}` });
-  socket.on('connect', () => { setPill('sockPill', true, 'socket ✓'); log('Socket connected to CNCjs.'); });
-  socket.on('error', () => log('Socket error from CNCjs.'));
-  socket.on('disconnect', () => { setPill('sockPill', false, 'socket ✗'); log('Socket disconnected.'); });
-  socket.on('serialport:open', (info) => { if (info?.port) { ctx.port = info.port; refreshCtxUI(); log(`Serial open: ${info.port}`); } });
-  socket.on('controller:state', (type, state) => onControllerState(type, state));
+  session.connect(ctx.token);
 }
 
 // Push live machine coordinates / feed to the pendant LCD.
@@ -230,3 +197,5 @@ function boot() {
 }
 
 document.addEventListener('DOMContentLoaded', boot);
+window.addEventListener('pagehide', () => session.disconnect());
+
