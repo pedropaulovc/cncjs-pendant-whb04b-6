@@ -75,7 +75,10 @@ machine coordinates (`X/Y/Z`). Values use the controller's reported units.
 Feed and spindle fields show **override percentages**, matching CNCjs's override
 controls even when the machine is stationary. They do not show actual feed or RPM.
 The mode indicator follows MPG, Step, and Continuous. LCD write failures appear
-in the widget log.
+in the widget log. Losing the CNCjs connection or selecting unsupported A/B/C
+axes shows RESET with cleared values. Missing coordinates or override feedback
+is logged once; no substitute live values are invented. A stalled HID transfer
+disconnects the pendant after one second; reconnect it from the widget.
 
 Open the machine port in CNCjs first. The widget joins the selected open port,
 or the sole open port if CNCjs has not supplied a selection. With several open

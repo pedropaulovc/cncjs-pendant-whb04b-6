@@ -82,3 +82,50 @@ test('parseInput decodes mapped values and signed jog movement', () => {
     raw: bytes,
   });
 });
+
+test('a slow HID transfer sends the active frame then only the newest snapshot', async () => {
+  const pendant = new WHB04BWebHID();
+  let release;
+  const reports = [];
+  pendant.connected = true;
+  pendant.device = { async sendFeatureReport(id, bytes) {
+    reports.push([...bytes]);
+    if (reports.length === 1) await new Promise(resolve => { release = resolve; });
+  } };
+  const first = pendant.sendDisplayData(buildDisplayFrame({ x: 1 }));
+  const superseded = pendant.sendDisplayData(buildDisplayFrame({ x: 2 }));
+  const latest = pendant.sendDisplayData(buildDisplayFrame({ x: 3 }));
+  release();
+  await Promise.all([first, superseded, latest]);
+  assert.equal(reports.length, 6);
+  assert.equal(reports[0][4], 1);
+  assert.equal(reports[3][4], 3);
+});
+
+test('feature-report errors propagate without an unsupported output-report fallback', async () => {
+  const pendant = new WHB04BWebHID();
+  pendant.connected = true;
+  pendant.device = {
+    async sendFeatureReport() { throw new Error('feature failed'); },
+    async sendReport() { assert.fail('Output reports are not the LCD protocol'); },
+  };
+  await assert.rejects(pendant.sendDisplayData(buildDisplayFrame()), /feature failed/);
+});
+
+test('a stalled feature report times out, closes the connection and rejects queued frames', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const pendant = new WHB04BWebHID();
+  let closed = 0;
+  pendant.connected = true;
+  pendant.device = {
+    sendFeatureReport() { return new Promise(() => {}); },
+    removeEventListener() {},
+    async close() { closed++; },
+  };
+  const first = assert.rejects(pendant.sendDisplayData(buildDisplayFrame()), /timed out/);
+  const queued = assert.rejects(pendant.sendDisplayData(buildDisplayFrame({ x: 1 })), /not connected/);
+  t.mock.timers.tick(1000);
+  await Promise.all([first, queued]);
+  assert.equal(pendant.connected, false);
+  assert.equal(closed, 1);
+});

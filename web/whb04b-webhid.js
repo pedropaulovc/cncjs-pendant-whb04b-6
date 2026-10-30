@@ -81,10 +81,9 @@ export class WHB04BWebHID extends EventTarget {
     this.connected = false;
     this._previous = null;
     this._onInput = (e) => this._handleInput(e);
-    // Serialize LCD writes: sendDisplayData is async and may be called
-    // un-awaited on every input event, so chain writes to stop the three
-    // feature reports of different frames interleaving on the device.
-    this._writeChain = Promise.resolve();
+    // Finish the active frame, then send only the latest pending snapshot.
+    this._pendingDisplay = null;
+    this._displayWriter = null;
     // React to physical plug/unplug of the already-authorised device.
     this._onConnect = (e) => { if (this._matches(e.device) && !this.connected) this._attach(e.device).catch(() => {}); };
     this._onDisconnect = (e) => { if (e.device === this.device) this._teardown(true); };
@@ -156,23 +155,49 @@ export class WHB04BWebHID extends EventTarget {
 
   // Queues the frame behind any in-flight write so chunks never interleave.
   sendDisplayData(frame) {
-    const run = () => this._writeFrame(frame);
-    const p = this._writeChain.then(run, run);
-    // Keep the chain alive even if this write rejects; return the real result.
-    this._writeChain = p.catch(() => {});
-    return p;
+    return new Promise((resolve, reject) => {
+      const waiters = this._pendingDisplay?.waiters || [];
+      waiters.push({ resolve, reject });
+      this._pendingDisplay = { frame: frame.slice(), waiters };
+      if (!this._displayWriter) this._displayWriter = this._drainDisplay();
+    });
+  }
+
+  async _drainDisplay() {
+    while (this._pendingDisplay) {
+      const { frame, waiters } = this._pendingDisplay;
+      this._pendingDisplay = null;
+      try {
+        await this._writeFrame(frame);
+        for (const waiter of waiters) waiter.resolve();
+      } catch (error) {
+        for (const waiter of waiters) waiter.reject(error);
+      }
+    }
+    this._displayWriter = null;
   }
 
   async _writeFrame(frame) {
     if (!this.device || !this.connected) throw new Error('Device not connected.');
+    const device = this.device;
     for (let i = 0; i < OUTPUT_PAYLOAD_SIZE; i += OUTPUT_CHUNK) {
+      if (device !== this.device || !this.connected) throw new Error('Device disconnected during LCD update.');
       const chunk = new Uint8Array(OUTPUT_CHUNK);
       chunk.set(frame.subarray(i, i + OUTPUT_CHUNK));
+      let timer;
       try {
-        await this.device.sendFeatureReport(OUTPUT_REPORT_ID, chunk);
-      } catch {
-        await this.device.sendReport(OUTPUT_REPORT_ID, chunk);
-      }
+        await Promise.race([
+          device.sendFeatureReport(OUTPUT_REPORT_ID, chunk),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => {
+              // Stop this connection before any further chunks can be sent.
+              if (device === this.device) this._teardown(true);
+              Promise.resolve().then(() => device.close()).catch(() => {});
+              reject(new Error('Pendant LCD feature report timed out; reconnect the pendant.'));
+            }, 1000);
+          }),
+        ]);
+      } finally { clearTimeout(timer); }
     }
   }
 

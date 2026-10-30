@@ -17,7 +17,7 @@
 // client version always matches the CNCjs server (2.x).
 
 import {
-  WHB04BWebHID, JogMode,
+  WHB04BWebHID, buildDisplayFrame, JogMode,
 } from '../whb04b-webhid.js';
 import { CncjsSession, isParentMessage } from './cncjs-session.js';
 import { Grbl } from './grbl.js';
@@ -91,6 +91,7 @@ const session = new CncjsSession({
     setPill('sockPill', status.phase === 'joined', status.phase);
     refreshCtxUI();
     if (status.detail) log(status.detail);
+    onControllerState('Grbl', session.state);
   },
   onState: onControllerState,
 });
@@ -118,10 +119,18 @@ function connectSocket() {
 
 // Push live machine coordinates / feed to the pendant LCD.
 let displayError = '';
+let displayNotice = '';
 async function onControllerState(type, state) {
   if (!pendant.connected) return;
   try {
-    const frame = controllerDisplayFrame(state, { coordinates: controls.coordinates, jogMode });
+    const unsupportedAxes = [0x14, 0x15, 0x16].includes(controls.axisCode);
+    const unavailable = session.status.phase !== 'joined' || unsupportedAxes;
+    const frame = unavailable ? buildDisplayFrame({ jogMode: JogMode.Reset })
+      : controllerDisplayFrame(state, { coordinates: controls.coordinates, jogMode });
+    const notice = unsupportedAxes ? 'Pendant LCD: A/B/C positions unavailable on this XYZ GRBL integration; showing RESET.'
+      : !frame ? 'Pendant LCD: waiting for complete coordinates and Ov feed/spindle override feedback.' : '';
+    if (notice && notice !== displayNotice) log(notice);
+    displayNotice = notice;
     if (!frame) return;
     await pendant.sendDisplayData(frame);
     if (displayError) log('Pendant LCD updates restored.');
@@ -134,7 +143,9 @@ async function onControllerState(type, state) {
 }
 
 function handleInput(d) {
+  const previousAxis = controls.axisCode;
   if (!document.hidden) controls.handleInput(d);
+  if (previousAxis !== controls.axisCode) onControllerState('Grbl', session.state);
 
   // mirror to UI
   $('k1').textContent = d.firstKey; $('k2').textContent = d.secondKey;
