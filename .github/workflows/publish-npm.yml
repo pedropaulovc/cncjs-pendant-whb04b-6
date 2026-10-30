@@ -1,26 +1,69 @@
-name: Publish npm package
+name: Release and publish npm package
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   group: npm-publish
-  cancel-in-progress: false
+  queue: max
 
 jobs:
-  publish:
+  validate-release:
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out the release tag
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify release tag matches package version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          expected_tag="v$(node -p 'require("./package.json").version')"
+          test "$RELEASE_TAG" = "$expected_tag"
+
+      - name: Validate release notes in the changelog
+        env:
+          PACKAGE_VERSION: ${{ github.ref_name }}
+        run: |
+          PACKAGE_VERSION="${PACKAGE_VERSION#v}"
+          awk -v heading="## [$PACKAGE_VERSION]" '
+            $0 == heading || index($0, heading " - ") == 1 {
+              found = 1
+              next
+            }
+            found && /^## / { exit }
+            found { print }
+            END {
+              if (!found) {
+                print "Missing changelog section: " heading > "/dev/stderr"
+                exit 1
+              }
+            }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md
+          grep -q '[^[:space:]]' release-notes.md
+
+  publish:
+    needs: validate-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Set up Node.js
@@ -39,12 +82,89 @@ jobs:
       - name: Check package contents
         run: npm run pack:check
 
-      - name: Verify release tag matches package version
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: |
-          expected_tag="v$(node -p \"require('./package.json').version\")"
-          test "$RELEASE_TAG" = "$expected_tag"
-
       - name: Publish to npm
-        run: npm publish
+        run: |
+          package_name="$(node -p 'require("./package.json").name')"
+          package_version="$(node -p 'require("./package.json").version')"
+          package_spec="${package_name}@${package_version}"
+          pack_metadata="$(mktemp)"
+          trap 'rm -f "$pack_metadata"' EXIT
+
+          npm pack --dry-run --json > "$pack_metadata"
+          local_integrity="$(node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const packages = JSON.parse(readFileSync(process.argv[1], "utf8"));
+            const packed = Array.isArray(packages) ? packages[0] : Object.values(packages)[0];
+            if (typeof packed?.integrity !== "string") {
+              throw new Error("npm pack did not report an integrity value.");
+            }
+            process.stdout.write(packed.integrity);
+          ' "$pack_metadata")"
+
+          if published_metadata="$(npm view "$package_spec" dist.integrity --json --loglevel=error 2>/dev/null)"; then
+            published_integrity="$(node --input-type=module -e '
+              const value = JSON.parse(process.argv[1]);
+              const integrity = Array.isArray(value) ? value[0] : value;
+              if (typeof integrity !== "string") {
+                throw new Error("npm registry did not report an integrity value.");
+              }
+              process.stdout.write(integrity);
+            ' "$published_metadata")"
+
+            if [ "$local_integrity" = "$published_integrity" ]; then
+              echo "$package_spec is already published with matching integrity."
+              exit 0
+            fi
+
+            echo "$package_spec already exists with different integrity." >&2
+            exit 1
+          fi
+
+          npm publish
+
+  create-release:
+    needs: [validate-release, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Extract release notes from the changelog
+        env:
+          PACKAGE_VERSION: ${{ github.ref_name }}
+        run: |
+          PACKAGE_VERSION="${PACKAGE_VERSION#v}"
+          awk -v heading="## [$PACKAGE_VERSION]" '
+            $0 == heading || index($0, heading " - ") == 1 {
+              found = 1
+              next
+            }
+            found && /^## / { exit }
+            found { print }
+            END {
+              if (!found) {
+                print "Missing changelog section: " heading > "/dev/stderr"
+                exit 1
+              }
+            }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md
+          grep -q '[^[:space:]]' release-notes.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" --json id >/dev/null 2>&1; then
+            echo "GitHub Release $RELEASE_TAG already exists."
+            exit 0
+          fi
+
+          gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file release-notes.md --verify-tag
