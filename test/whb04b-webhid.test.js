@@ -175,7 +175,7 @@ test('timeout reconnect waits for the old close before reopening the same device
   };
   pendant.device = device;
   pendant.connected = true;
-  Object.defineProperty(navigator, 'hid', { configurable: true, value: { async getDevices() { return [device]; } } });
+  Object.defineProperty(navigator, 'hid', { configurable: true, value: { addEventListener() {}, async getDevices() { return [device]; } } });
   t.after(() => { delete navigator.hid; });
   let reconnect;
   pendant.addEventListener('remove', () => { reconnect = pendant.tryReconnect(); });
@@ -203,6 +203,7 @@ test('destroy supersedes an attachment waiting on device close', async () => {
   const closing = pendant._closeDevice(device);
   const attach = assert.rejects(pendant._attach(device), /superseded/);
   await Promise.resolve();
+  await Promise.resolve();
   const destroying = pendant.destroy();
   finishClose();
   await Promise.all([closing, attach, destroying]);
@@ -213,7 +214,7 @@ test('destroy supersedes an attachment waiting on device close', async () => {
 test('a newer attachment supersedes a pending attachment', async () => {
   const pendant = new WHB04BWebHID();
   let finishOpen;
-  const old = { opened: false, open() { return new Promise(resolve => { finishOpen = resolve; }); }, addEventListener() { assert.fail('Old attachment revived'); } };
+  const old = { opened: false, removeEventListener() {}, open() { return new Promise(resolve => { finishOpen = () => { old.opened = true; resolve(); }; }); }, async close() { old.opened = false; }, addEventListener() { assert.fail('Old attachment revived'); } };
   const current = { opened: true, addEventListener() {} };
   const stale = assert.rejects(pendant._attach(old), /superseded/);
   await Promise.resolve();
@@ -222,4 +223,119 @@ test('a newer attachment supersedes a pending attachment', async () => {
   await stale;
   assert.equal(pendant.device, current);
   assert.equal(pendant.connected, true);
+  assert.equal(old.opened, false);
 });
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+test('demo disconnect/connect restores physical unplug listeners and rejects old device input', async t => {
+  const hid = new EventTarget();
+  const createDevice = () => Object.assign(new EventTarget(), {
+    vendorId: 0x10ce, productId: 0xeb93, opened: true,
+    async open() { this.opened = true; }, async close() { this.opened = false; },
+  });
+  const first = createDevice(), second = createDevice();
+  let selection = first;
+  hid.requestDevice = async () => [selection];
+  Object.defineProperty(navigator, 'hid', { configurable: true, value: hid });
+  t.after(() => { delete navigator.hid; });
+  const pendant = new WHB04BWebHID();
+  let uses = 0;
+  pendant.addEventListener('use', () => { uses++; });
+  const input = device => {
+    const event = new Event('inputreport');
+    Object.assign(event, { reportId: 4, data: new DataView(Uint8Array.of(0, 0, 0, 13, 17, 1, 0).buffer) });
+    device.dispatchEvent(event);
+  };
+  await pendant.requestDevice();
+  input(first);
+  assert.equal(uses, 1);
+  await pendant.destroy();
+  await pendant.requestDevice();
+  assert.equal(first.opened, true);
+  const unplug = new Event('disconnect');
+  Object.assign(unplug, { device: first });
+  hid.dispatchEvent(unplug);
+  assert.equal(pendant.connected, false);
+  await pendant.requestDevice();
+  selection = second;
+  const closeGate = deferred();
+  first.close = async () => { await closeGate.promise; first.opened = false; };
+  await pendant.requestDevice();
+  input(first);
+  assert.equal(uses, 1, 'Old input must not reach controls while its close is pending');
+  input(second);
+  assert.equal(uses, 2);
+  closeGate.resolve();
+  await pendant.destroy();
+});
+
+test('destroy waits for open to settle before closing; close during open would reject', async () => {
+  const pendant = new WHB04BWebHID();
+  const started = deferred(), finish = deferred();
+  const calls = [];
+  const device = {
+    opened: false, phase: 'closed', removeEventListener() {},
+    async open() { device.phase = 'opening'; calls.push('open'); started.resolve(); await finish.promise; device.opened = true; device.phase = 'open'; },
+    async close() { assert.notEqual(device.phase, 'opening', 'WebHID rejects close while opening'); calls.push('close'); device.opened = false; device.phase = 'closed'; },
+    addEventListener() { assert.fail('Destroyed open must not attach'); },
+  };
+  const attach = assert.rejects(pendant._attach(device), /superseded/);
+  await started.promise;
+  const destroy = pendant.destroy();
+  assert.deepEqual(calls, ['open']);
+  finish.resolve();
+  await Promise.all([attach, destroy]);
+  assert.deepEqual(calls, ['open', 'close']);
+  assert.equal(device.opened, false);
+  assert.equal(pendant.connected, false);
+});
+
+test('a newer attachment to the same opening device retains ownership', async () => {
+  const pendant = new WHB04BWebHID();
+  const started = deferred(), finish = deferred();
+  let opens = 0;
+  const device = {
+    opened: false, addEventListener() {},
+    async open() { opens++; started.resolve(); await finish.promise; device.opened = true; },
+    close() { assert.fail('New attachment owns this device'); },
+  };
+  const first = assert.rejects(pendant._attach(device), /superseded/);
+  await started.promise;
+  const latest = pendant._attach(device);
+  finish.resolve();
+  await Promise.all([first, latest]);
+  assert.equal(opens, 1);
+  assert.equal(pendant.connected, true);
+  assert.equal(device.opened, true);
+});
+
+test('a rejected close is evicted so a later reconnect can succeed', async () => {
+  const pendant = new WHB04BWebHID();
+  const device = { opened: true, async close() { throw new Error('transient close'); }, addEventListener() {} };
+  await assert.rejects(pendant._closeDevice(device), /transient close/);
+  await pendant._attach(device);
+  assert.equal(pendant.connected, true);
+});
+
+for (const method of ['getDevices', 'requestDevice']) {
+  test(`destroy invalidates pending ${method} discovery without preventing a later explicit connection`, async t => {
+    const pendant = new WHB04BWebHID();
+    const discovery = deferred();
+    const device = { vendorId: 0x10ce, productId: 0xeb93, opened: true, addEventListener() {} };
+    Object.defineProperty(navigator, 'hid', { configurable: true, value: { [method]: () => discovery.promise, addEventListener() {}, removeEventListener() {} } });
+    t.after(() => { delete navigator.hid; });
+    const pending = method === 'getDevices' ? pendant.tryReconnect() : pendant.requestDevice();
+    await pendant.destroy();
+    discovery.resolve([device]);
+    assert.equal(await pending, false);
+    assert.equal(pendant.connected, false);
+    assert.equal(pendant.device, null);
+    await pendant._attach(device);
+    assert.equal(pendant.connected, true);
+  });
+}

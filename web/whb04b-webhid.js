@@ -86,6 +86,7 @@ export class WHB04BWebHID extends EventTarget {
     this._displayWriter = null;
     this._displayEpoch = 0;
     this._deviceClosing = new WeakMap();
+    this._deviceOpening = new WeakMap();
     this._lifecycle = 'active';
     // React to physical plug/unplug of the already-authorised device.
     this._onConnect = (e) => { if (this._matches(e.device) && !this.connected) this._attach(e.device).catch(() => {}); };
@@ -106,7 +107,9 @@ export class WHB04BWebHID extends EventTarget {
 
   async tryReconnect() {
     if (!WHB04BWebHID.isSupported()) return false;
+    const epoch = this._displayEpoch;
     const devices = await navigator.hid.getDevices();
+    if (epoch !== this._displayEpoch || this._lifecycle !== 'active') return false;
     const match = devices.find((d) => this._matches(d));
     if (!match) return false;
     await this._attach(match);
@@ -115,9 +118,11 @@ export class WHB04BWebHID extends EventTarget {
 
   async requestDevice() {
     if (!WHB04BWebHID.isSupported()) throw new Error('WebHID not supported in this browser.');
+    const epoch = this._displayEpoch;
     const devices = await navigator.hid.requestDevice({
       filters: [{ vendorId: WHB04B_VENDOR_ID, productId: WHB04B_PRODUCT_ID }],
     });
+    if (epoch !== this._displayEpoch || this._lifecycle !== 'active') return false;
     if (!devices.length) return false;
     await this._attach(devices[0]);
     return true;
@@ -126,24 +131,47 @@ export class WHB04BWebHID extends EventTarget {
   async _attach(device) {
     if (this._lifecycle !== 'active') throw new Error('Pendant is being disconnected.');
     const epoch = ++this._displayEpoch;
+    if (this.device && this.device !== device) {
+      this.device.removeEventListener('inputreport', this._onInput);
+      this._closeDevice(this.device).catch(() => {});
+    }
     this.device = device;
     this.connected = false;
     await this._deviceClosing.get(device);
     if (epoch !== this._displayEpoch) throw new Error('Pendant connection was superseded.');
-    if (!device.opened) await device.open();
-    if (epoch !== this._displayEpoch) throw new Error('Pendant connection was superseded.');
+    if (!device.opened) await this._openDevice(device);
+    if (epoch !== this._displayEpoch) {
+      if (this.device !== device) await this._closeDevice(device);
+      throw new Error('Pendant connection was superseded.');
+    }
     device.addEventListener('inputreport', this._onInput);
+    if (WHB04BWebHID.isSupported()) {
+      navigator.hid.addEventListener('connect', this._onConnect);
+      navigator.hid.addEventListener('disconnect', this._onDisconnect);
+    }
     this.connected = true;
     this.dispatchEvent(new CustomEvent('attach', { detail: { device } }));
+  }
+
+  _openDevice(device) {
+    const pending = this._deviceOpening.get(device);
+    if (pending) return pending;
+    const opening = Promise.resolve().then(() => device.open());
+    this._deviceOpening.set(device, opening);
+    const clear = () => this._deviceOpening.delete(device);
+    opening.then(clear, clear);
+    return opening;
   }
 
   _closeDevice(device) {
     const pending = this._deviceClosing.get(device);
     if (pending) return pending;
     // Register before remove listeners can request reconnection.
-    const closing = Promise.resolve().then(() => device.close());
+    const opening = this._deviceOpening.get(device);
+    const closing = Promise.resolve(opening).catch(() => {}).then(() => device.opened === false ? undefined : device.close());
     this._deviceClosing.set(device, closing);
-    closing.then(() => this._deviceClosing.delete(device), () => {});
+    const clear = () => this._deviceClosing.delete(device);
+    closing.then(clear, clear);
     return closing;
   }
 
@@ -162,6 +190,7 @@ export class WHB04BWebHID extends EventTarget {
   }
 
   _handleInput(e) {
+    if (!this.connected || e.currentTarget !== this.device) return;
     if (e.reportId !== INPUT_REPORT_ID) return;
     const body = new Uint8Array(e.data.buffer, e.data.byteOffset, e.data.byteLength);
     const bytes = new Uint8Array(body.length + 1);
