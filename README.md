@@ -97,7 +97,7 @@ the live key/dial/jog readout and push coordinates to the LCD.
 | Button | Function |
 |--------|----------|
 | Reset | Emergency reset |
-| Stop | Stop current operation |
+| Stop | Cancel jogs, clear queued commands, and feed-hold programmed motion |
 | Start/Pause | Cycle start |
 | M-Home | Homing |
 | Safe-Z | Move to safe Z height |

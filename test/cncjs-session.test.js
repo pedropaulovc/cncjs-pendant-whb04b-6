@@ -60,6 +60,12 @@ function fixture() {
   return { session, socket, sockets, timers, emitted, states, list, join };
 }
 
+test('Stop clears queued commands, cancels a jog, and holds programmed motion', () => {
+  const commands = [];
+  new Grbl({ command: (...args) => commands.push(args) }).stop();
+  assert.deepEqual(commands.map(([name]) => name), ['gcode:stop', 'feeder:stop', 'jogCancel', 'feedhold']);
+});
+
 test('joins an active port and delivers initial and subsequent state', () => {
   const f = fixture();
   assert.equal(f.emitted[0][0], 'list');
