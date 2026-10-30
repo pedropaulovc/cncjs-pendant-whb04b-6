@@ -140,8 +140,11 @@ export class CncjsSession {
       if (type === 'Grbl') this.settings = settings;
     });
     on('workflow:state', state => {
-      if ((this.pendingPort || this.status.port) && ['idle', 'running', 'paused'].includes(state)) this.workflowState = state;
+      if (!(this.pendingPort || this.status.port) || !['idle', 'running', 'paused'].includes(state)) return;
+      const previous = this.workflowState;
+      this.workflowState = state;
       if (state !== 'idle') {
+        if (state !== previous) this.motionEpoch += 1;
         // CNCjs consumes program acknowledgements internally. If the program is
         // stopped, remaining replies can become visible again without writes.
         this.clearJogReceipts();

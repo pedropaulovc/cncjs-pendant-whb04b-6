@@ -196,6 +196,8 @@ export class Grbl {
     if (!['active', 'armed'].includes(this.jogPhase) || !error || error.sequence <= this.jogErrorSequence || this.jogSessionChanged()) return 'unchanged';
     if (this.session.status?.phase !== 'joined' || this.session.workflowState !== 'idle' || this.session.stopPhase !== 'idle') return 'unchanged';
     this.jogErrorSequence = error.sequence;
+    if (this.jogPhase === 'armed' && this.jogReceipt?.transmission === 'written'
+      && !['written', 'rejected'].includes(this.jogReceipt.state)) return 'unchanged';
     this.log(`Controller ${error.line} during pendant jogging; canceling queued jogs and waiting for Idle.`);
     this.cancelJog('controller-error');
     return 'recovering';
@@ -251,7 +253,16 @@ export class Grbl {
     if (!this.manualReady('allow-jog')) return this.refuse('Jog: controller must be idle or jogging with no running program.');
     const max = this.maxRate(axis);
     if (!max) return this.refuse(`Jog: waiting for GRBL ${axis} maximum-rate setting.`);
-    const pending = ['active', 'armed'].includes(this.jogPhase) && !this.jogCompleted() && this.jogTarget?.axis === axis ? this.jogTarget : null;
+    let pending = ['active', 'armed'].includes(this.jogPhase) && !this.jogCompleted() && this.jogTarget?.axis === axis ? this.jogTarget : null;
+    // Passive ownership may outlive a separate CNCjs move or coordinate change.
+    // Rebase the next Step on fresh feedback once all owned lines were written;
+    // unsent owned lines still need their accumulated relative target.
+    const current = this.position(axis);
+    if (pending && this.jogPhase === 'armed' && this.jogReceipt?.transmission === 'written'
+      && current && current.sequence > this.jogPositionSequence) {
+      const tolerance = Math.max(current.resolution, pending.resolution) + 1e-8;
+      if (current.kind !== pending.kind || current.units !== pending.units || Math.abs(current.value - pending.value) > 2 * tolerance) pending = null;
+    }
     const position = this.position(axis, pending?.kind);
     const previous = pending || position;
     const receipt = this.session.jog(`$J=G21 G91 ${axis}${distance.toFixed(4)} F${Math.min(feed, max).toFixed(3)}`);

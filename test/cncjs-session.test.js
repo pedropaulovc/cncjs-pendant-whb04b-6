@@ -681,6 +681,85 @@ test('passive queued jogs still clear owned feeder commands and resume wheel inp
   f.grbl.clearJog();
 });
 
+test('a program invalidates a passive target without changing the Stop generation',()=>{
+  const f=gatedJogFixture();
+  f.socket.receive('workflow:state','running'); f.socket.receive('workflow:state','idle');
+  f.grbl.jog('X',0.001,250); f.tick(); f.tick(); f.tick();
+  assert.equal(f.grbl.jogPhase,'armed');
+  const generation=f.session.generation, epoch=f.session.motionEpoch;
+  f.socket.receive('workflow:state','running');
+  assert.ok(f.session.motionEpoch>epoch);
+  assert.equal(f.session.generation,generation);
+  f.machine.x=10; f.broadcast(); f.socket.receive('workflow:state','idle');
+  assert.equal(f.grbl.jog('X',1,250),'sent');
+  assert.equal(f.grbl.jogTarget.value,11);
+  f.machine.x=11; f.broadcast(); f.tick();
+  assert.equal(f.grbl.jogPhase,'idle');
+  assert.equal(f.jobs.size,0);
+});
+
+test('fresh external motion replaces a written passive target before the next Step',()=>{
+  const f=gatedJogFixture();
+  f.socket.receive('workflow:state','running'); f.socket.receive('workflow:state','idle');
+  f.grbl.jog('X',0.001,250); f.tick(); f.tick(); f.tick();
+  assert.equal(f.grbl.jogPhase,'armed');
+  f.machine.x=5; f.broadcast();
+  assert.equal(f.grbl.jog('X',1,250),'sent');
+  assert.equal(f.grbl.jogTarget.value,6);
+  f.machine.x=6; f.broadcast(); f.tick();
+  assert.equal(f.grbl.jogPhase,'idle');
+  assert.equal(f.jobs.size,0);
+});
+
+test('a fresh coordinate-frame change replaces a written passive target',()=>{
+  const f=gatedJogFixture();
+  f.socket.receive('workflow:state','running'); f.socket.receive('workflow:state','idle');
+  f.grbl.jog('X',0.001,250); f.tick(); f.tick(); f.tick();
+  f.socket.receive('serialport:read','<Idle|WPos:10.000,0.000,0.000|FS:0,0>');
+  assert.equal(f.grbl.jog('X',1,250),'sent');
+  assert.equal(f.grbl.jogTarget.kind,'WPos');
+  assert.equal(f.grbl.jogTarget.value,11);
+  f.socket.receive('serialport:read','<Idle|WPos:11.000,0.000,0.000|FS:0,0>');
+  f.tick(); assert.equal(f.grbl.jogPhase,'idle');
+});
+
+test('an unrelated MDI error after passive acknowledgement does not refuse the next Step',()=>{
+  const f=gatedJogFixture();
+  f.socket.receive('workflow:state','running'); f.socket.receive('workflow:state','idle');
+  f.grbl.jog('X',0.001,250); f.tick(); f.tick(); f.tick();
+  f.socket.receive('serialport:write','G1\n',{source:'client'});
+  f.socket.receive('serialport:read','error:22 (Undefined feed rate)');
+  assert.equal(f.grbl.jog('Y',1,250),'sent');
+  assert.equal(stopCommands(f).some(([name])=>name==='jogCancel'||name==='feeder:stop'),false);
+  assert.equal(f.logs.some(line=>line.includes('error:22')),false);
+  f.grbl.clearJog();
+});
+
+test('a passive queued jog still recovers when a controller error precedes its write',()=>{
+  const f=gatedJogFixture('delayed');
+  f.socket.receive('workflow:state','running'); f.socket.receive('workflow:state','idle');
+  f.grbl.jog('X',0.001,250); f.tick(); f.tick(); f.tick();
+  assert.equal(f.grbl.jogPhase,'armed');
+  f.socket.receive('serialport:read','error:22 (Undefined feed rate)');
+  assert.equal(f.grbl.jog('Y',1,250),'dropped');
+  assert.equal(stopCommands(f).some(([name])=>name==='feeder:stop'),true);
+  f.grbl.clearJog();
+});
+
+test('a passive written jog with a new rejection still recovers before accepting input',()=>{
+  const f=gatedJogFixture('delayed');
+  f.socket.receive('workflow:state','running'); f.socket.receive('workflow:state','idle');
+  f.grbl.jog('X',0.001,250);
+  const [,code,context]=stopCommands(f).findLast(([name])=>name==='gcode');
+  f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
+  f.tick(); f.tick(); f.tick();
+  f.socket.receive('serialport:read','error:15 (Travel exceeded)');
+  assert.equal(f.grbl.jog('Y',1,250),'dropped');
+  assert.equal(stopCommands(f).some(([name])=>name==='jogCancel'),true);
+  assert.equal(stopCommands(f).some(([name])=>name==='feeder:stop'),false);
+  f.grbl.clearJog();
+});
+
 test('receipt invalidation preserves observed transmission and observes a later final write',()=>{
   const f=gatedJogFixture('delayed');
   f.grbl.jog('X',0.001,250);
