@@ -500,3 +500,64 @@ test('a Step below physical/report resolution completes after two requested Idle
   f.tick(); f.tick(); f.tick();
   assert.equal(f.jobs.size,0); assert.equal(f.grbl.jogPhase,'idle');
 });
+
+// These dual-frame values were verified against CNCjs 1.11.5 GrblRunner:
+// <Idle|WPos:0.000,0.000,0.000|WCO:10.000,0.000,0.000|FS:0,0>
+// yields mpos.x='10.000', wpos.x='0.000'. No CNCjs runtime dependency is needed.
+for(const kind of ['MPos','WPos']) for(const order of ['raw-first','broadcast-first']) test(`jog completion survives ${kind} reports and dual-frame broadcasts (${order})`,()=>{
+  const f=gatedJogFixture();
+  const broadcast=x=>f.socket.receive('controller:state','Grbl',{status:{activeState:'Idle',
+    mpos:{x:(x+(kind==='WPos'?10:0)).toFixed(3),y:'0.000',z:'0.000'},
+    wpos:{x:(x-(kind==='MPos'?10:0)).toFixed(3),y:'0.000',z:'0.000'}}});
+  const raw=x=>f.socket.receive('serialport:read',`<Idle|${kind}:${x.toFixed(3)},0.000,0.000|FS:0,0>`);
+  broadcast(0); raw(0);
+  assert.equal(f.grbl.jog('X',0.04,250),'sent');
+  assert.equal(f.grbl.jogTarget.kind,kind);
+  if(order==='raw-first') { raw(0.04); broadcast(0.04); }
+  if(order==='broadcast-first') { broadcast(0.04); raw(0.04); }
+  assert.equal(f.grbl.jogCompleted(),true);
+  f.grbl.cancelJog();
+  assert.equal(stopCommands(f).some(([name])=>name==='jogCancel'),false);
+  assert.equal(f.grbl.jog('Y',0.04,250),'sent');
+  f.grbl.clearJog();
+});
+
+test('an offset-only WPos broadcast refreshes its own sample without refreshing MPos',()=>{
+  const f=gatedJogFixture();
+  const broadcast=x=>f.socket.receive('controller:state','Grbl',{status:{activeState:'Idle',
+    mpos:{x:'10.000',y:'0.000',z:'0.000'},wpos:{x,y:'0.000',z:'0.000'}}});
+  broadcast('0.000');
+  const machineSequence=f.session.positionReports.MPos.sequence;
+  const workSequence=f.session.positionReports.WPos.sequence;
+  broadcast('-5.000');
+  assert.equal(f.session.positionReports.MPos.sequence,machineSequence);
+  assert.ok(f.session.positionReports.WPos.sequence>workSequence);
+  assert.equal(f.grbl.jog('X',0.04,250),'sent');
+  assert.equal(f.grbl.jogTarget.kind,'WPos');
+  assert.equal(f.grbl.jogTarget.value,-4.96);
+  f.grbl.clearJog();
+});
+
+test('a report in the other frame cannot make a stale target-frame endpoint fresh',()=>{
+  const f=gatedJogFixture();
+  f.grbl.jog('X',0.04,250);
+  const machineSequence=f.session.positionReports.MPos.sequence;
+  f.socket.receive('serialport:read','<Idle|WPos:0.040,0.000,0.000|FS:0,0>');
+  assert.equal(f.session.positionReports.MPos.sequence,machineSequence);
+  assert.equal(f.grbl.jogCompleted(),false);
+  f.grbl.clearJog();
+});
+
+test('both frame caches retain their own reporting units and are cleared on reset/disconnect',()=>{
+  const f=gatedJogFixture();
+  f.socket.receive('serialport:read','<Idle|WPos:0.000,0.000,0.000|FS:0,0>');
+  f.socket.receive('controller:settings','Grbl',{settings:{$13:'1',$110:'3000'}});
+  f.socket.receive('serialport:read','<Idle|MPos:1.0000,0.0000,0.0000|FS:0,0>');
+  assert.equal(f.session.positionReports.WPos.units,'0');
+  assert.equal(f.session.positionReports.MPos.units,'1');
+  f.socket.receive('serialport:read','Grbl 1.1h');
+  assert.deepEqual(f.session.positionReports,{});
+  f.socket.receive('serialport:read','<Idle|WPos:1.0000,0.0000,0.0000|FS:0,0>');
+  f.session.disconnect();
+  assert.deepEqual(f.session.positionReports,{});
+});
