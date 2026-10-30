@@ -44,7 +44,8 @@ async function refreshMacros() {
     const records = await macroLibrary.list();
     if (request !== catalogRequest) return;
     macroSettings.setCatalog(records);
-    macroSettings.setStatus('ready');
+    macroSettings.setStatus('ready', macroLibrary.notice
+      ? `${records.length} saved CNCjs macros available. ${macroLibrary.notice}` : undefined);
   } catch (error) {
     if (request === catalogRequest) macroSettings.setStatus('error', error.message);
   }

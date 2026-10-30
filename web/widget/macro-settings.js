@@ -67,7 +67,7 @@ export class MacroSettings {
     this.rows.set(slot, row);
     this.updateOptions(row, 'disabled');
     select.addEventListener('change', () => { this.updateRow(row); this.onChange(); });
-    code.addEventListener('input', () => this.onChange());
+    code.addEventListener('input', () => { this.updateRow(row); this.onChange(); });
   }
 
   option(value, text) {
@@ -102,7 +102,14 @@ export class MacroSettings {
     row.preview.hidden = true;
     row.note.dataset.state = 'normal';
     if (selection === 'disabled') { row.note.textContent = 'This Fn combination has no macro assigned.'; return; }
-    if (selection === 'custom') { row.note.textContent = 'Up to 2,000 characters. Save settings to apply your changes.'; return; }
+    if (selection === 'custom') {
+      row.note.textContent = 'Up to 2,000 characters. Save settings to apply your changes.';
+      if (row.code.value.trim()) {
+        try { validateMacroContent(row.code.value); }
+        catch (error) { row.note.dataset.state = 'missing'; row.note.textContent = error.message; }
+      }
+      return;
+    }
     const macro = this.catalog.get(selection.slice(6));
     if (!macro) {
       row.note.dataset.state = this.catalogState === 'ready' ? 'missing' : 'normal';

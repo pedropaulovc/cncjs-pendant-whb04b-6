@@ -1,3 +1,5 @@
+import { validateMacroContent } from './macro-validation.js';
+
 // LinuxCNC xhc-whb04b-6 mappings, with GRBL's XYZ and realtime-command limits.
 export const SELECTORS = {
   0x0d: { percent: 2, step: 0.001 }, 0x0e: { percent: 5, step: 0.01 },
@@ -60,6 +62,8 @@ export class PendantControls {
     if (assignment?.source === 'cncjs') { this.onSavedMacro(assignment.id); return; }
     const code = assignment?.trim();
     if (!code) { this.log(`Macro ${number} is not configured.`); return; }
+    try { validateMacroContent(code); }
+    catch (error) { this.log(`Macro ${number}: ${error.message}`); return; }
     this.grbl.macro(code.split(/\r?\n/).filter(line => line.trim()));
   }
   key(code, modifier) {
