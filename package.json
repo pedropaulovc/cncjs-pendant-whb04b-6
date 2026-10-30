@@ -8,7 +8,7 @@
     "cnc",
     "webhid"
   ],
-  "version": "3.0.0-dev.0",
+  "version": "3.0.0",
   "license": "MIT",
   "contributors": [
     "Jim Derry <balthisar@gmail.com>",
@@ -16,10 +16,43 @@
     "Chris Midgley <chris@koose.com>"
   ],
   "homepage": "https://github.com/pedropaulovc/cncjs-pendant-whb04b-6#readme",
-  "bugs": "https://github.com/pedropaulovc/cncjs-pendant-whb04b-6/issues",
-  "repository": "github:pedropaulovc/cncjs-pendant-whb04b-6",
+  "bugs": {
+    "url": "https://github.com/pedropaulovc/cncjs-pendant-whb04b-6/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pedropaulovc/cncjs-pendant-whb04b-6.git"
+  },
   "type": "module",
+  "main": "./web/whb04b-webhid.js",
+  "types": "./web/whb04b-webhid.d.ts",
+  "exports": {
+    ".": {
+      "types": "./web/whb04b-webhid.d.ts",
+      "import": "./web/whb04b-webhid.js",
+      "default": "./web/whb04b-webhid.js"
+    },
+    "./webhid": {
+      "types": "./web/whb04b-webhid.d.ts",
+      "import": "./web/whb04b-webhid.js",
+      "default": "./web/whb04b-webhid.js"
+    },
+    "./widget/whb04b-widget.js": "./web/widget/whb04b-widget.js",
+    "./widget/index.html": "./web/widget/index.html",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "web"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "serve": "python3 -m http.server 8000 --directory web"
+    "serve": "python3 -m http.server 8000 --directory web",
+    "test": "node --test",
+    "pack:check": "npm pack --dry-run"
   }
 }

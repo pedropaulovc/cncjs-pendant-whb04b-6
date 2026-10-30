@@ -26,6 +26,25 @@ web/
     whb04b-widget.js  widget integration (creds from parent, grbl mapping)
 ```
 
+## Install from npm
+
+```bash
+npm install cncjs-pendant-whb04b-6
+```
+
+Import the dependency-free WebHID driver in a browser project:
+
+```js
+import {
+  WHB04BWebHID,
+  buildDisplayFrame,
+  JogMode,
+} from 'cncjs-pendant-whb04b-6';
+
+const pendant = new WHB04BWebHID();
+const frame = buildDisplayFrame({ jogMode: JogMode.Step, x: 12.345 });
+```
+
 ## Use it as a CNCjs custom widget (recommended)
 
 The widget runs in a same-origin iframe inside CNCjs, so `navigator.hid` works
@@ -35,6 +54,10 @@ the `~/.cncrc` secret.
 1. Mount the widget folder from the CNCjs server:
 
    ```bash
+   # installed package
+   cncjs --mount /whb04b:/path/to/node_modules/cncjs-pendant-whb04b-6/web/widget
+
+   # local checkout
    cncjs --mount /whb04b:/path/to/cncjs-pendant-whb04b-6/web/widget
    ```
 
