@@ -63,7 +63,7 @@ function fixture() {
 test('Stop uses CNCjs forced program stop and jog cancel without holding an idle machine', () => {
   const commands = [];
   new Grbl({ command: (...args) => commands.push(args) }).stop();
-  assert.deepEqual(commands, [['gcode:stop', { force: true }], ['feeder:stop', undefined], ['jogCancel', undefined]]);
+  assert.deepEqual(commands, [['gcode:stop', { force: true }], ['feeder:stop', undefined], ['jogCancel', undefined], ['statusreport', undefined]]);
 });
 
 test('joins an active port and delivers initial and subsequent state', () => {
