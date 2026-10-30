@@ -17,11 +17,12 @@
 // client version always matches the CNCjs server (2.x).
 
 import {
-  WHB04BWebHID, buildDisplayFrame, JogMode, CoordinateSystem,
+  WHB04BWebHID, JogMode,
 } from '../whb04b-webhid.js';
 import { CncjsSession, isParentMessage } from './cncjs-session.js';
 import { Grbl } from './grbl.js';
 import { PendantControls, CONFIG_KEY, parseConfig } from './pendant-controls.js';
+import { controllerDisplayFrame } from './pendant-display.js';
 
 //---------------------------------------------------------------------------
 // Credential + context acquisition from the parent frame
@@ -116,15 +117,19 @@ function connectSocket() {
 }
 
 // Push live machine coordinates / feed to the pendant LCD.
-function onControllerState(type, state) {
-  const st = state?.status || {};
-  const pos = (controls.coordinates === 'machine' ? st.mpos : st.wpos) || {};
-  const x = Number(pos.x) || 0, y = Number(pos.y) || 0, z = Number(pos.z) || 0;
-  const feed = Number(st.feedrate) || 0;
-  const spindle = Number(st.spindle) || 0;
-  if (pendant.connected) {
-    pendant.sendDisplayData(buildDisplayFrame({ jogMode, coordinateSystem: controls.coordinates === 'work' ? CoordinateSystem.X1Y1Z1 : CoordinateSystem.XYZ, x, y, z, feedRate: feed, spindleRate: spindle }))
-      .catch(() => { /* device may be busy */ });
+let displayError = '';
+async function onControllerState(type, state) {
+  if (!pendant.connected) return;
+  try {
+    const frame = controllerDisplayFrame(state, { coordinates: controls.coordinates, jogMode });
+    if (!frame) return;
+    await pendant.sendDisplayData(frame);
+    if (displayError) log('Pendant LCD updates restored.');
+    displayError = '';
+  } catch (error) {
+    const message = `Pendant LCD update failed: ${error.message}`;
+    if (displayError !== message) log(message);
+    displayError = message;
   }
 }
 
@@ -167,7 +172,7 @@ function boot() {
   listenParentMessages(refreshCtxUI);
   refreshCtxUI();
 
-  pendant.addEventListener('attach', () => { setPill('hidPill', true, 'pendant ✓'); log('Pendant connected.'); });
+  pendant.addEventListener('attach', () => { setPill('hidPill', true, 'pendant ✓'); log('Pendant connected.'); onControllerState('Grbl', session.state); });
   pendant.addEventListener('remove', () => { controls.suspend(); grbl.clearOverrides(); controls.keys.clear(); setPill('hidPill', false, 'pendant ✗'); log('Pendant removed.'); });
   pendant.addEventListener('use', (e) => handleInput(e.detail));
 

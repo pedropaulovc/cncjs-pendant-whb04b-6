@@ -3,8 +3,6 @@
 // Runs directly in a Chromium browser (Chrome/Edge/Opera) over https or
 // localhost -- no build step, no node-hid. ES module.
 //
-// This is the hand-written JS twin of src/whb04b_controller_webhid.ts so the
-// demo page (index.html) can be opened with no toolchain.
 
 export const WHB04B_VENDOR_ID = 0x10ce;
 export const WHB04B_PRODUCT_ID = 0xeb93;
@@ -32,28 +30,31 @@ export const LeftDial = {
   0x14: 'A', 0x15: 'B', 0x16: 'C',
 };
 
-export const JogMode = { None: 0, Continuous: 1, Step: 2, Reset: 3 };
-export const CoordinateSystem = { XYZ: 0, X1Y1Z1: 1 };
+export const JogMode = { None: 2, Continuous: 0, Step: 1, Reset: 0x40 };
+export const CoordinateSystem = { XYZ: 0, X1Y1Z1: 0x80 };
 
-// Build the 21-byte display frame (identical bytes to the node-hid version).
+// LinuxCNC xhc-whb04b-6 usb.h/usb.cc: 21 payload bytes, excluding report ID 0x06.
 export function buildDisplayFrame({
   jogMode = JogMode.None, coordinateSystem = CoordinateSystem.XYZ,
   x = 0, y = 0, z = 0, feedRate = 0, spindleRate = 0,
 } = {}) {
   const data = new Uint8Array(OUTPUT_PAYLOAD_SIZE);
   const dv = new DataView(data.buffer);
-  const fc = (c) => (Math.round(c * 10000) >>> 0);
-  let o = 0;
-  data[o++] = 0x06;
-  data[o++] = jogMode;
-  data[o++] = coordinateSystem;
-  o += 4;
-  dv.setUint32(o, fc(x), true); o += 4;
-  const yc = fc(y);
-  data[o++] = yc & 0xff; data[o++] = (yc >>> 8) & 0xff; data[o++] = (yc >>> 16) & 0xff;
-  dv.setUint32(o, fc(z), true); o += 4;
-  dv.setUint16(o, feedRate & 0xffff, true); o += 2;
-  data[o] = spindleRate & 0xff;
+  if (!Object.values(JogMode).includes(jogMode) || !Object.values(CoordinateSystem).includes(coordinateSystem)) {
+    throw new RangeError('Unsupported pendant display mode.');
+  }
+  data.set([0xfe, 0xfd, 0xfe, jogMode | coordinateSystem]);
+  for (const [index, coordinate] of [x, y, z].entries()) {
+    const scaled = Math.round(Math.abs(coordinate) * 10000);
+    if (!Number.isFinite(coordinate) || scaled > 655359999) throw new RangeError('Pendant coordinates must be finite and within ±65535.9999.');
+    const offset = 4 + index * 4;
+    dv.setUint16(offset, Math.floor(scaled / 10000), true);
+    dv.setUint16(offset + 2, (scaled % 10000) | (coordinate < 0 ? 0x8000 : 0), true);
+  }
+  for (const [index, rate] of [feedRate, spindleRate].entries()) {
+    if (!Number.isInteger(rate) || rate < 0 || rate > 65535) throw new RangeError('Pendant rates must be integers from 0 to 65535.');
+    dv.setUint16(16 + index * 2, rate, true);
+  }
   return data;
 }
 

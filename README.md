@@ -70,6 +70,13 @@ The widget reads the CNCjs token and active serial port from the parent frame,
 maps the pendant's keys, dials, and jog wheel to grbl commands, and mirrors the
 machine coordinates to the pendant LCD.
 
+The LCD shows work coordinates (`X1/Y1/Z1`) by default; Macro-10 switches to
+machine coordinates (`X/Y/Z`). Values use the controller's reported units.
+Feed and spindle fields show **override percentages**, matching CNCjs's override
+controls even when the machine is stationary. They do not show actual feed or RPM.
+The mode indicator follows MPG, Step, and Continuous. LCD write failures appear
+in the widget log.
+
 Open the machine port in CNCjs first. The widget joins the selected open port,
 or the sole open port if CNCjs has not supplied a selection. With several open
 ports it waits for an explicit selection. It reconnects after a network drop

@@ -6,23 +6,26 @@ export const RightDial: Readonly<Record<number, string>>;
 export const LeftDial: Readonly<Record<number, string>>;
 
 export const JogMode: Readonly<{
-  None: 0;
-  Continuous: 1;
-  Step: 2;
-  Reset: 3;
+  /** MPG indicator. */
+  None: 2;
+  Continuous: 0;
+  Step: 1;
+  Reset: 64;
 }>;
 
 export const CoordinateSystem: Readonly<{
   XYZ: 0;
-  X1Y1Z1: 1;
+  X1Y1Z1: 128;
 }>;
 
 export interface DisplayFrameOptions {
   jogMode?: number;
   coordinateSystem?: number;
+  /** Coordinates: finite, four decimal places, magnitude at most 65535.9999. */
   x?: number;
   y?: number;
   z?: number;
+  /** Unsigned 16-bit integers. The CNCjs widget supplies override percentages. */
   feedRate?: number;
   spindleRate?: number;
 }
