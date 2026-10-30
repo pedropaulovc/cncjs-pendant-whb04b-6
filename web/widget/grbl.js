@@ -167,10 +167,13 @@ export class Grbl {
     return Math.abs(position.value - this.jogTarget.value) <= tolerance;
   }
   unmeasuredJogCompleted(acknowledgedIdle) {
-    if (this.session.replyTracking === 'unknown' && this.jogCompletionNotice === 'none'
+    if (this.session.replyTracking === 'unknown'
       && this.session.reportSequence >= this.jogSequence + 2 && this.session.idleReports >= 2) {
-      this.jogCompletionNotice = 'shown';
-      this.log('Jog completion cannot be confirmed after joining an active controller or program activity. Jog cancellation remains armed; change mode/axis or press Stop to cancel. Reset restores acknowledgement tracking.');
+      this.jogPhase = 'armed';
+      if (this.jogCompletionNotice === 'none') {
+        this.jogCompletionNotice = 'shown';
+        this.log('Jog completion cannot be confirmed after joining an active controller or program activity. Polling paused; jog cancellation remains armed. Change mode/axis or press Stop to cancel. Reset restores acknowledgement tracking.');
+      }
     }
     return acknowledgedIdle;
   }
@@ -190,7 +193,7 @@ export class Grbl {
   }
   recoverJogError() {
     const error = this.session.controllerError;
-    if (this.jogPhase !== 'active' || !error || error.sequence <= this.jogErrorSequence || this.jogSessionChanged()) return 'unchanged';
+    if (!['active', 'armed'].includes(this.jogPhase) || !error || error.sequence <= this.jogErrorSequence || this.jogSessionChanged()) return 'unchanged';
     if (this.session.status?.phase !== 'joined' || this.session.workflowState !== 'idle' || this.session.stopPhase !== 'idle') return 'unchanged';
     this.jogErrorSequence = error.sequence;
     this.log(`Controller ${error.line} during pendant jogging; canceling queued jogs and waiting for Idle.`);
@@ -204,16 +207,19 @@ export class Grbl {
       if (this.jogSessionChanged() || this.session.status?.phase !== 'joined' || this.session.stopPhase !== 'idle' || this.session.workflowState !== 'idle' || ['Alarm', 'Sleep', 'Check'].includes(this.activeState)) { this.clearJog(); return; }
       if (this.recoverJogError() === 'recovering') return;
       if (this.jogPhase === 'idle' || (this.jogPhase === 'active' && this.jogCompleted()) || (this.jogPhase === 'canceling' && this.cancellationCompleted())) { this.clearJog(); return; }
+      if (this.jogPhase === 'armed') return;
       this._cmd('statusreport');
       this.pollJog();
     }, 100);
   }
   cancelJog(cause = 'operator') {
     if (cause === 'operator' && this.recoverJogError() === 'recovering') return;
-    if (this.jogPhase !== 'active') return;
+    if (!['active', 'armed'].includes(this.jogPhase)) return;
     this.jogPhase = 'idle';
     if (this.jogSessionChanged() || this.session.workflowState !== 'idle' || (cause === 'operator' && this.jogCompleted())) { this.clearJog(); return; }
-    this._cmd('feeder:stop');
+    // Once the last owned line was written, no owned commands remain in the
+    // feeder. A later CNCjs macro must not be discarded by passive cancellation.
+    if (this.jogReceipt?.transmission !== 'written') this._cmd('feeder:stop');
     if (this._cmd('jogCancel') === 'dropped') return;
     this.cancelSequence = this.session.reportSequence;
     this.jogPhase = 'canceling';
@@ -223,7 +229,7 @@ export class Grbl {
   jogPulse(axis, distance, feed) {
     if (this.jogSessionChanged()) this.clearJog();
     this.recoverJogError();
-    if (this.jogPhase === 'active' && this.jogGeneration === this.session.generation) {
+    if (['active', 'armed'].includes(this.jogPhase) && this.jogGeneration === this.session.generation) {
       if (!this.jogCompleted()) return 'pending';
       this.jogPhase = 'idle';
     }
@@ -245,7 +251,7 @@ export class Grbl {
     if (!this.manualReady('allow-jog')) return this.refuse('Jog: controller must be idle or jogging with no running program.');
     const max = this.maxRate(axis);
     if (!max) return this.refuse(`Jog: waiting for GRBL ${axis} maximum-rate setting.`);
-    const pending = this.jogPhase === 'active' && !this.jogCompleted() && this.jogTarget?.axis === axis ? this.jogTarget : null;
+    const pending = ['active', 'armed'].includes(this.jogPhase) && !this.jogCompleted() && this.jogTarget?.axis === axis ? this.jogTarget : null;
     const position = this.position(axis, pending?.kind);
     const previous = pending || position;
     const receipt = this.session.jog(`$J=G21 G91 ${axis}${distance.toFixed(4)} F${Math.min(feed, max).toFixed(3)}`);

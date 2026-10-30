@@ -583,7 +583,8 @@ test('joining mid-flight cannot mistake an unseen old ACK for tiny-Step completi
   f.socket.receive('serialport:read','ok'); // Could belong to a pre-join dwell.
   f.tick(); f.tick(); f.tick(); f.tick();
   assert.equal(f.grbl.jogCompleted(),false);
-  assert.equal(f.grbl.jogPhase,'active');
+  assert.equal(f.grbl.jogPhase,'armed');
+  assert.equal(f.jobs.size,0);
   assert.equal(f.logs.filter(line=>line.includes('cannot be confirmed')).length,1);
   f.grbl.cancelJog();
   assert.ok(stopCommands(f).some(([name])=>name==='jogCancel'));
@@ -633,6 +634,88 @@ test('raw partial writes invalidate ACK correlation while realtime bytes do not'
   f.socket.receive('serialport:read','Grbl 1.1h');
   f.socket.receive('serialport:write','G21\r',{source:'client'});
   assert.equal(f.session.replyTracking,'unknown');
+});
+
+for(const command of ['$g','$ G']) test(`normalized parser query ${command} cannot misalign jog acknowledgements`,()=>{
+  const f=gatedJogFixture('delayed');
+  f.socket.receive('serialport:write',`${command}\n`,{source:'client'});
+  f.grbl.jog('X',0.001,250);
+  const [,code,context]=stopCommands(f).findLast(([name])=>name==='gcode');
+  f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
+  f.socket.receive('serialport:read','ok');
+  assert.equal(f.grbl.jogReceipt.state,'acknowledged');
+  f.tick(); f.tick(); f.tick();
+  assert.equal(f.grbl.jogPhase,'idle');
+});
+
+for(const position of ['known','missing']) test(`uncertain ${position}-position jog becomes passive without discarding later MDI`,()=>{
+  const f=gatedJogFixture();
+  f.socket.receive('workflow:state','running'); f.socket.receive('workflow:state','idle');
+  if(position==='missing') { f.session.positionReport=null; f.session.positionReports={}; }
+  f.grbl.jog('X',position==='known'?0.001:1,250);
+  assert.equal(f.grbl.jogReceipt.state,'uncertain');
+  assert.equal(f.grbl.jogReceipt.transmission,'written');
+  for(let n=0;n<600;n++) f.tick();
+  assert.equal(f.grbl.jogPhase,'armed');
+  assert.equal(f.jobs.size,0);
+  assert.equal(stopCommands(f).filter(([name])=>name==='statusreport').length,2);
+  f.socket.receive('serialport:write','G4 P2\n',{source:'feeder'});
+  f.grbl.cancelJog();
+  assert.equal(stopCommands(f).some(([name])=>name==='feeder:stop'),false);
+  assert.equal(stopCommands(f).some(([name])=>name==='jogCancel'),true);
+  f.tick(); f.tick();
+  assert.equal(f.grbl.jogPhase,'idle');
+});
+
+test('passive queued jogs still clear owned feeder commands and resume wheel input with the same target',()=>{
+  const f=gatedJogFixture('delayed');
+  f.socket.receive('workflow:state','running'); f.socket.receive('workflow:state','idle');
+  f.grbl.jog('X',0.001,250);
+  f.tick(); f.tick(); f.tick();
+  assert.equal(f.grbl.jogPhase,'armed');
+  assert.equal(f.grbl.jog('X',0.04,250),'sent');
+  assert.equal(f.grbl.jogPhase,'active');
+  assert.equal(f.grbl.jogTarget.value,0.041);
+  f.grbl.cancelJog();
+  assert.equal(stopCommands(f).some(([name])=>name==='feeder:stop'),true);
+  f.grbl.clearJog();
+});
+
+test('receipt invalidation preserves observed transmission and observes a later final write',()=>{
+  const f=gatedJogFixture('delayed');
+  f.grbl.jog('X',0.001,250);
+  const [,code,context]=stopCommands(f).findLast(([name])=>name==='gcode');
+  f.socket.receive('serialport:write','G21',{source:'client'}); // Correlation lost.
+  assert.equal(f.grbl.jogReceipt.state,'discarded');
+  f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
+  assert.equal(f.grbl.jogReceipt.transmission,'written');
+  assert.equal(f.grbl.jogReceipt.state,'discarded','A write must not resurrect an invalid ACK receipt');
+  f.tick(); f.tick(); f.tick();
+  f.grbl.cancelJog();
+  assert.equal(stopCommands(f).some(([name])=>name==='feeder:stop'),false);
+  f.grbl.clearJog();
+});
+
+test('a startup banner during a running program cannot synchronize hidden sender replies',()=>{
+  const f=gatedJogFixture();
+  f.socket.receive('workflow:state','running');
+  f.socket.receive('serialport:read','Grbl 1.1h');
+  assert.equal(f.session.replyTracking,'unknown');
+  f.socket.receive('workflow:state','idle');
+  assert.equal(f.session.replyTracking,'unknown');
+  f.socket.receive('serialport:read','Grbl 1.1h');
+  assert.equal(f.session.replyTracking,'synchronized');
+});
+
+test('a rejected written-only jog cancels motion without discarding unrelated feeder commands',()=>{
+  const f=gatedJogFixture('delayed'); f.grbl.jog('X',1,250);
+  const [,code,context]=stopCommands(f).findLast(([name])=>name==='gcode');
+  f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
+  f.socket.receive('serialport:read','error:15 (Travel exceeded)');
+  f.tick(); f.tick(); f.tick();
+  assert.equal(stopCommands(f).some(([name])=>name==='feeder:stop'),false);
+  assert.equal(stopCommands(f).some(([name])=>name==='jogCancel'),true);
+  assert.equal(f.grbl.jogPhase,'idle');
 });
 
 // These dual-frame values were verified against CNCjs 1.11.5 GrblRunner:
@@ -715,7 +798,10 @@ for(const travel of ['sub-resolution','out-and-back']) test(`unchanged dual-fram
 });
 
 test('a rejected Step drains owned jogs, confirms Idle, and recovers without endless polling',()=>{
-  const f=gatedJogFixture(); f.grbl.jog('X',1,250);
+  const f=gatedJogFixture('delayed'); f.grbl.jog('X',1,250);
+  const [,code,context]=stopCommands(f).findLast(([name])=>name==='gcode');
+  f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
+  f.grbl.jog('X',1,250); // A second owned line is still in the CNCjs feeder.
   f.socket.receive('serialport:read','error:15 (Jog target exceeds machine travel)');
   for(let i=0;i<5;i++) f.tick();
   assert.equal(f.grbl.jogPhase,'idle'); assert.equal(f.jobs.size,0);

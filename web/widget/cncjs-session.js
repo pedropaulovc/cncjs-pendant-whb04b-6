@@ -28,6 +28,7 @@ export class CncjsSession {
     this.serialReplies = [];
     this.jogId = 0;
     this.jogOwner = crypto.randomUUID();
+    this.latestJog = null;
     this.parserReply = 'none';
     this.replyTracking = 'unknown';
     this.activeState = '';
@@ -46,6 +47,7 @@ export class CncjsSession {
 
   clear() {
     this.clearJogReceipts();
+    this.latestJog = null;
     this.serialReplies = [];
     this.parserReply = 'none';
     this.replyTracking = 'unknown';
@@ -143,6 +145,7 @@ export class CncjsSession {
         // CNCjs consumes program acknowledgements internally. If the program is
         // stopped, remaining replies can become visible again without writes.
         this.clearJogReceipts();
+        this.latestJog = null;
         this.serialReplies = [];
         this.replyTracking = 'unknown';
       }
@@ -155,9 +158,10 @@ export class CncjsSession {
       }
       if (typeof line === 'string' && line.startsWith('Grbl ')) {
         this.clearJogReceipts();
+        this.latestJog = null;
         this.serialReplies = [];
         this.parserReply = 'none';
-        this.replyTracking = 'synchronized';
+        this.replyTracking = this.workflowState === 'idle' ? 'synchronized' : 'unknown';
         this.motionEpoch += 1;
         this.motionState = '';
         this.activeState = '';
@@ -243,7 +247,8 @@ export class CncjsSession {
       return { state: 'dropped', reportSequence: null };
     }
     const id = `${this.jogOwner}:${this.generation}:${++this.jogId}`;
-    const receipt = { state: 'queued', reportSequence: null };
+    const receipt = { state: 'queued', transmission: 'queued', reportSequence: null };
+    this.latestJog = { id, receipt };
     this.jogReceipts.set(id, receipt);
     if (this.command('gcode', code, { pendantJog: id }) === 'dropped') {
       this.jogReceipts.delete(id);
@@ -272,7 +277,7 @@ export class CncjsSession {
       const command = line.trim();
       // CNCjs consumes $G acknowledgements separately from the feeder. Its
       // automatic queries are not broadcast as writes at all.
-      if (command === '$G') continue;
+      if (command.toUpperCase().replace(/\s/g, '') === '$G') continue;
       // Bound bookkeeping if a controller stops replying. Losing correlation
       // must retain jog ownership rather than manufacture an acknowledgement.
       if (this.serialReplies.length >= 256) {
@@ -281,7 +286,8 @@ export class CncjsSession {
         this.replyTracking = 'unknown';
       }
       const receipt = this.jogReceipts.get(context.pendantJog);
-      if (receipt) receipt.state = 'written';
+      if (this.latestJog && this.latestJog.id === context.pendantJog) this.latestJog.receipt.transmission = 'written';
+      if (receipt) { receipt.state = 'written'; receipt.transmission = 'written'; }
       this.serialReplies.push({ id: context.pendantJog, receipt });
     }
   }

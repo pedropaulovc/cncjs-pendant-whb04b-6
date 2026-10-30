@@ -186,6 +186,10 @@ cannot be confirmed and keeps jog cancellation armed. Changing mode/axis or
 pressing Stop cancels those jogs; a controller reset restores acknowledgement
 tracking. Program activity also invalidates this tracking. Ordinary Steps with
 a fresh, visibly changed endpoint still complete normally.
+After two Idle reports, uncertain jogs stop polling and remain passively armed.
+Mode/axis cancellation clears the feeder only while owned jog lines remain
+unsent, preserving later CNCjs macros once all owned lines were written. Stop
+continues to cancel all queued work explicitly.
 
 Only XYZ axes are supported by stock GRBL; A/B/C and Off do not jog. Macros,
 homing, spindle G-code, and coolant G-code require an idle controller with no
