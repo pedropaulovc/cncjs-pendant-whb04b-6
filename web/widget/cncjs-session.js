@@ -1,7 +1,7 @@
 // Own one CNCjs socket and join only a port already opened by the operator.
 export class CncjsSession {
-  constructor({ io, origin, onStatus = () => {}, onState = () => {}, schedule = (...args) => setInterval(...args), cancel = (...args) => clearInterval(...args) }) {
-    Object.assign(this, { io, origin, onStatus, onState, schedule, cancel });
+  constructor({ io, origin, onStatus = () => {}, onState = () => {}, onConfig = () => {}, schedule = (...args) => setInterval(...args), cancel = (...args) => clearInterval(...args) }) {
+    Object.assign(this, { io, origin, onStatus, onState, onConfig, schedule, cancel });
     this.socket = null;
     this.timer = null;
     this.stopTimer = null;
@@ -113,6 +113,7 @@ export class CncjsSession {
     };
     on('connect_error', connectionError);
     on('error', connectionError);
+    on('config:change', () => this.onConfig());
     on('serialport:change', () => this.discover());
     on('serialport:close', () => {
       this.clear();

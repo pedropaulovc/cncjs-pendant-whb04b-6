@@ -57,7 +57,7 @@ the `~/.cncrc` secret.
    # installed package
    cncjs --mount /whb04b:/path/to/node_modules/cncjs-pendant-whb04b-6/web
 
-   # local checkout
+   # local checkout: first run npm ci && npm run build in that checkout
    cncjs --mount /whb04b:/path/to/cncjs-pendant-whb04b-6/web
    ```
 
@@ -143,9 +143,31 @@ The remaining Fn combinations run operator-configured G-code macros:
 | Reset / Stop / Start-Pause | 11 / 12 / 13 |
 | Macro-10 | 14 |
 
-Configure these under **Pendant settings → Advanced: G-code macros**. For example,
-`{"1":"G0 X0","2":"G0 Y0"}` assigns Fn+Feed+ and Fn+Feed-. An unconfigured macro
+Configure these under **Pendant settings → Macro buttons**. Each labelled Fn
+combination can be disabled, assigned multiline custom G-code, or linked to a saved
+CNCjs macro. Click **Save settings** to apply the assignments in this browser.
+An unconfigured macro
 only logs its slot number. Bare Reset and Stop retain their normal behavior.
+
+Saved macros come from the same CNCjs Macro widget and remain linked by ID. The
+list refreshes when CNCjs settings change; **Refresh CNCjs macros** reloads it
+manually without discarding unsaved edits. Deleted macros remain visibly
+unavailable until you replace or disable their assignments.
+
+Each press fetches the current definition and sends that checked snapshot through
+CNCjs's G-code feeder. Controller variables such as `posx` and `modal.units`, and
+`%` assignments, use CNCjs's evaluator. Pending requests are discarded if you press
+another button, change selectors, save settings, leave the page, or the controller
+changes state. Failed requests never run a cached definition or retry motion.
+
+The pendant does not invoke CNCjs's optional **Run Macro** event hooks. CNCjs also
+does not expose its Visualizer bounds to custom widgets, so macros referencing or
+assigning `xmin`, `xmax`, `ymin`, `ymax`, `zmin`, or `zmax` in expressions are refused
+with an explanation. Run those macros from CNCjs's Macro widget.
+
+The npm package includes the expression parser. For development from a Git
+checkout, run `npm ci` and `npm run build` before serving the widget. `npm test`
+and `npm pack` build the pinned parser automatically and include its license.
 
 ### Wheel and selector
 

@@ -330,11 +330,12 @@ test('port close disarms commands and resumes discovery without closing hardware
   assert.equal(f.emitted.some(([event]) => event === 'close' || event === 'command'), false);
 });
 
-test('jog and fixed-distance macros use mm even after a prior G20 command', () => {
+test('jog and fixed-distance macros use mm even after a prior G20 command', (t) => {
   const commands = [];
   const grbl = new Grbl({ command: (...args) => commands.push(args), status: { phase: 'joined' },
     jog: code => { commands.push(['gcode', code]); return { state: 'queued' }; },
     stopPhase: 'idle', workflowState: 'idle', activeState: 'Idle', settings: { settings: { $110: '3000' } } }, () => 12.5);
+  t.after(() => grbl.clearJog());
   grbl.jog('X', -0.2, 250);
   assert.deepEqual(commands.pop(), ['gcode', '$J=G21 G91 X-0.2000 F250.000']);
   grbl.wcsHome();

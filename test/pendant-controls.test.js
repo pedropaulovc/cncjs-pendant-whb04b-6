@@ -151,6 +151,29 @@ test('invalid configuration fails without accepting arbitrary macro keys', () =>
   for (const value of [{largeSteps:true},{stepFeed:0},{spindleIncrement:NaN},{macros:[]},{macros:{3:'M3'}},{macros:{1:()=>{}}}]) assert.throws(()=>parseConfig(value));
 });
 
+test('configured custom macros refuse unavailable bounds while ordinary commands still run', () => {
+  const f = fixture();
+  f.controls.setConfig({ macros: { 1: 'G0 X[xmax]', 2: 'G21\nG0 X0' } });
+  f.press(4, 0x0c);
+  assert.deepEqual(f.commands, []);
+  assert.match(f.logs.at(-1), /uses xmax/);
+  f.press(5, 0x0c);
+  assert.deepEqual(f.commands, [['gcode', ['G21', 'G0 X0']]]);
+});
+
+test('saved macro references dispatch their ID once per physical press and reject malformed assignments', () => {
+  const f = fixture(), selected = [];
+  f.controls.onSavedMacro = id => selected.push(id);
+  f.controls.setConfig({ macros: { 1: { source: 'cncjs', id: 'saved', name: 'A macro' } } });
+  f.input({ firstKeyCode: 0x0c, secondKeyCode: 4 });
+  f.input({ firstKeyCode: 0x0c, secondKeyCode: 4 });
+  assert.deepEqual(selected, ['saved']);
+  assert.deepEqual(f.commands, []);
+  for (const assignment of [{ source: 'cncjs', id: '' }, { source: 'cncjs', id: 1 }, { source: 'other', id: 'x' }]) {
+    assert.throws(() => parseConfig({ macros: { 1: assignment } }));
+  }
+});
+
 test('completed Step releases jog ownership so changing mode does not discard the next wheel input', () => {
   const f=fixture(); f.press(0x0f); f.input({jog:1});
   f.session.reportSequence++; f.session.idleReports=1; f.session.activeState='Idle'; f.session.positionReport={...f.session.positionReport,values:[0.1,0,0],sequence:f.session.reportSequence};

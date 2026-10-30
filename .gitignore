@@ -3,3 +3,4 @@ node_modules
 tsconfig.tsbuildinfo
 lib
 bin/
+web/widget/vendor/
