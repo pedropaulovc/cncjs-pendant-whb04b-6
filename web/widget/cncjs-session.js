@@ -179,7 +179,7 @@ export class CncjsSession {
     }
     if (state === 'Idle' || state === 'Alarm') {
       this.finishStop();
-      this.update('joined', state === 'Alarm' ? 'Stop completed with controller alarm; inspect CNCjs.' : '');
+      this.update('joined', state === 'Alarm' ? 'Stop completed with controller alarm; inspect CNCjs.' : 'Stop completed.');
       return;
     }
     if (state === 'Hold:0') {
