@@ -5,6 +5,15 @@ import { CncjsMacros } from '../web/widget/cncjs-macros.js';
 const macro = { id: 'saved/one', name: 'Return to work origin', content: 'G0 X0 Y0', mtime: 1 };
 const response = data => ({ ok: true, status: 200, json: async () => data });
 
+test('default fetch retains the Window-compatible receiver', async t => {
+  t.mock.method(globalThis, 'fetch', function () {
+    assert.equal(this, globalThis);
+    return Promise.resolve(response({ records: [] }));
+  });
+  const api = new CncjsMacros({ getToken: () => 'token' });
+  assert.deepEqual(await api.list(), []);
+});
+
 test('lists and reads saved macros with the current bearer token and no cache', async () => {
   let token = 'first';
   const calls = [];

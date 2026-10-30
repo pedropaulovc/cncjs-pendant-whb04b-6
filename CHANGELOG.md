@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [3.1.0] - 2026-10-30
+
+### Added
+
+- Labelled Fn-button assignments, multiline custom G-code, and saved CNCjs macro selection with previews.
+- Linked macro definitions refreshed from CNCjs, with missing-macro and request-error feedback.
+- Cancellation checks for macro loading and validation of expressions that require unavailable Visualizer bounds.
+
 ## [3.0.1] - 2026-10-30
 
 ### Fixed

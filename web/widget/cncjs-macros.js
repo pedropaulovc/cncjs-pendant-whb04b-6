@@ -1,6 +1,6 @@
 // Read CNCjs's shared macro store using the same session as the parent widget.
 export class CncjsMacros {
-  constructor({ getToken, fetch = globalThis.fetch } = {}) {
+  constructor({ getToken, fetch = (...args) => globalThis.fetch(...args) } = {}) {
     this.getToken = getToken;
     this.fetch = fetch;
   }

@@ -93,7 +93,7 @@ export class Grbl {
     return this._cmd('homing');
   }
   macro(code) {
-    if (!this.manualReady() || this.jogPhase !== 'idle') return this.refuse('Macro: controller must be idle with no running program or pending jog.');
+    if (!this.manualReady()) return this.refuse('Macro: controller must be idle with no running program.');
     return this.gcode(code);
   }
   spindleToggle() {
