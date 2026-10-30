@@ -139,7 +139,10 @@ export class CncjsSession {
   }
 
   stop() {
-    if (!this.socket?.connected || this.status.phase !== 'joined') return;
+    if (!this.socket?.connected || this.status.phase !== 'joined') {
+      this.update(this.status.phase, 'Stop dropped: no joined GRBL controller.');
+      return;
+    }
     if (!['idle', 'interrupted'].includes(this.stopPhase)) return;
     this.stopPhase = 'querying';
     this.update('joined', 'Stopping: waiting for controller status.');

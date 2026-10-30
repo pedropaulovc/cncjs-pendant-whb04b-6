@@ -74,6 +74,15 @@ test('Stop delegates cancellation to the joined session', () => {
   assert.equal(stops, 1);
 });
 
+test('Stop reports refusal without sending commands when disconnected or unsupported', () => {
+  const f = fixture();
+  f.session.stop();
+  assert.equal(f.session.status.detail, 'Stop dropped: no joined GRBL controller.');
+  f.join('COM1', 'Marlin'); f.session.stop();
+  assert.equal(f.session.status.detail, 'Stop dropped: no joined GRBL controller.');
+  assert.equal(stopCommands(f).length, 0);
+});
+
 test('Stop at Idle clears queues and confirms Idle without hold or reset', () => {
   const f = fixture(); f.join(); f.session.stop();
   assert.deepEqual(stopCommands(f).map(([name]) => name), ['gcode:stop', 'feeder:stop', 'jogCancel', 'statusreport']);
