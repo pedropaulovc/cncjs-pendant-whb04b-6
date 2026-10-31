@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [3.2.0] - 2026-10-30
+
+### Added
+
+- FluidNC support: read report units, steps per mm, and axis maximum rates from FluidNC config when `$$` omits `$13` and `$110`–`$112`. This enables jogging and the LCD on FluidNC.
+
 ## [3.1.0] - 2026-10-30
 
 ### Added

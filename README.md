@@ -212,6 +212,14 @@ controller settings instead of guessing a machine speed.
 If GRBL reports an error while the pendant owns a jog, the widget logs the error,
 cancels queued jogging, and waits for two Idle reports before accepting another jog.
 
+FluidNC keeps these limits in `config.yaml`, and its `$$` omits `$13` and
+`$100`–`$112`. When a joined, idle controller lacks `$13` or `$110`–`$112`, the
+widget sends `$I` once. If the reply identifies FluidNC, it reads
+`$/report_inches`, `$/axes/{x,y,z}/steps_per_mm`, and
+`$/axes/{x,y,z}/max_rate_mm_per_min`, and uses them as the matching GRBL
+settings. These read-only queries appear in the CNCjs console. FluidNC spindle
+speed maps are not translated to `$30`/`$31`, so Fn spindle-speed changes stay unavailable there.
+
 Tiny Steps and out-and-back Steps can end at the same reported position. Their
 completion requires the jog acknowledgement followed by two fresh Idle reports.
 When joining an already-open controller, CNCjs does not identify replies to
