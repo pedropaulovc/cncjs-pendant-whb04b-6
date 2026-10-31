@@ -1,3 +1,26 @@
+// FluidNC keeps machine limits in config.yaml and its $$ omits GRBL's numbered
+// report-unit, resolution, and maximum-rate settings. CNCjs records replies to
+// these config queries as settings; expose them under the GRBL numbers.
+const FLUIDNC_SETTINGS = {
+  $13: '$/report_inches',
+  $100: '$/axes/x/steps_per_mm', $101: '$/axes/y/steps_per_mm', $102: '$/axes/z/steps_per_mm',
+  $110: '$/axes/x/max_rate_mm_per_min', $111: '$/axes/y/max_rate_mm_per_min', $112: '$/axes/z/max_rate_mm_per_min',
+};
+const REQUIRED_SETTINGS = ['$13', '$110', '$111', '$112'];
+
+function withFluidncSettings(settings) {
+  const reported = settings?.settings || {};
+  const byPath = new Map(Object.entries(reported).map(([name, value]) => [name.toLowerCase(), String(value)]));
+  const mapped = {};
+  for (const [name, path] of Object.entries(FLUIDNC_SETTINGS)) {
+    const value = byPath.get(path);
+    if (Object.hasOwn(reported, name) || value === undefined) continue;
+    if (name !== '$13') mapped[name] = value;
+    else if (['true', 'false'].includes(value.toLowerCase())) mapped[name] = value.toLowerCase() === 'true' ? '1' : '0';
+  }
+  return Object.keys(mapped).length ? { ...settings, settings: { ...reported, ...mapped } } : settings;
+}
+
 // Own one CNCjs socket and join only a port already opened by the operator.
 export class CncjsSession {
   constructor({ io, origin, onStatus = () => {}, onState = () => {}, onConfig = () => {}, schedule = (...args) => setInterval(...args), cancel = (...args) => clearInterval(...args) }) {
@@ -11,6 +34,7 @@ export class CncjsSession {
     this.holdRequest = 'not-requested';
     this.workflowState = 'unknown';
     this.state = {};
+    this.settingsQuery = 'none';
     this.settings = {};
     this.reportSequence = 0;
     this.idleReports = 0;
@@ -57,6 +81,7 @@ export class CncjsSession {
     this.workflowState = 'unknown';
     this.state = {};
     this.settings = {};
+    this.settingsQuery = 'none';
     this.activeState = '';
     this.overrides = [];
     this.positionReport = null;
@@ -136,11 +161,13 @@ export class CncjsSession {
         this.recordPosition(kind, words.map(String), status.activeState);
       }
       if (Array.isArray(state?.status?.ov) && state.status.ov.length === 3) this.overrides = state.status.ov.map(Number);
+      this.requestSettings();
       this.onState(type, state);
     });
     on('controller:settings', (type, settings) => {
       if (type !== 'Grbl') return;
-      this.settings = settings;
+      this.settings = withFluidncSettings(settings);
+      this.requestSettings();
       this.onState(type, this.state);
     });
     on('workflow:state', state => {
@@ -156,6 +183,7 @@ export class CncjsSession {
         this.serialReplies = [];
         this.replyTracking = 'unknown';
       }
+      this.requestSettings();
     });
     on('serialport:write', (data, context = {}) => this.recordWrite(data, context));
     on('serialport:read', line => {
@@ -163,6 +191,8 @@ export class CncjsSession {
       if (typeof line === 'string' && /^error:\d+(?:\s|$)/.test(line)) {
         this.controllerError = { sequence: ++this.errorSequence, line };
       }
+      const version = typeof line === 'string' ? /^\[VER:(.*)\]$/.exec(line) : null;
+      if (version) this.readFirmwareSettings(version[1]);
       if (typeof line === 'string' && line.startsWith('Grbl ')) {
         this.clearJogReceipts();
         this.latestJog = null;
@@ -245,7 +275,26 @@ export class CncjsSession {
       this.status.port = target.port;
       this.update(this.status.controller === 'Grbl' ? 'joined' : 'unsupported',
         this.stopPhase === 'interrupted' ? 'Stop interrupted: inspect CNCjs, then press Stop or Reset to recover.' : '');
+      this.requestSettings();
     });
+  }
+
+  // Identify the firmware once per join when GRBL's $$ lacks settings the
+  // pendant needs. Only read-only queries are sent, and only while idle.
+  requestSettings() {
+    if (this.settingsQuery !== 'none' || this.status.phase !== 'joined' || this.stopPhase !== 'idle') return;
+    if (this.workflowState !== 'idle' || this.state?.status?.activeState !== 'Idle') return;
+    const settings = this.settings.settings || {};
+    if (REQUIRED_SETTINGS.every(name => Object.hasOwn(settings, name))) return;
+    this.settingsQuery = 'identifying';
+    if (this.command('gcode', '$I') === 'dropped') this.settingsQuery = 'none';
+  }
+
+  readFirmwareSettings(version) {
+    if (this.settingsQuery !== 'identifying') return;
+    if (!/\bFluidNC\b/i.test(version)) { this.settingsQuery = 'other-firmware'; return; }
+    this.settingsQuery = 'reading';
+    if (this.command('gcode', Object.values(FLUIDNC_SETTINGS).join('\n')) === 'dropped') this.settingsQuery = 'none';
   }
 
   jog(code) {

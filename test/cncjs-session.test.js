@@ -75,6 +75,45 @@ test('GRBL settings arriving after state request a redraw with the new report un
   assert.deepEqual(f.states, [['Grbl', state]]);
 });
 
+// CNCjs sends stored settings, state, and workflow before the open callback.
+function joinWithController(f, settings) {
+  f.list([{ port: 'COM5', inuse: true }]);
+  f.socket.receive('serialport:open', { port: 'COM5', controllerType: 'Grbl' });
+  f.socket.receive('controller:settings', 'Grbl', { version: '', parameters: {}, settings });
+  f.socket.receive('controller:state', 'Grbl', { status: { activeState: 'Idle', mpos: { x: '0.000', y: '0.000', z: '0.000' } } });
+  f.socket.receive('workflow:state', 'idle');
+  f.emitted.findLast(([event]) => event === 'open')[3](null);
+}
+
+test('FluidNC config supplies the report units and maximum rates its $$ omits', () => {
+  const f = fixture();
+  joinWithController(f, { $10: '1' });
+  assert.deepEqual(stopCommands(f), [['gcode', '$I']]);
+  f.socket.receive('serialport:read', '[VER:3.7 FluidNC v3.7.8:]');
+  const queries = stopCommands(f)[1][1].split('\n');
+  assert.ok(queries.includes('$/report_inches') && queries.includes('$/axes/z/max_rate_mm_per_min'));
+  // CNCjs records each `$path=value` reply as a setting and rebroadcasts.
+  f.socket.receive('controller:settings', 'Grbl', { settings: { $10: '1', '$/report_inches': 'false',
+    '$/axes/x/steps_per_mm': '160.000', '$/axes/x/max_rate_mm_per_min': '3000.000',
+    '$/axes/y/max_rate_mm_per_min': '3000.000', '$/axes/z/max_rate_mm_per_min': '2000.000' } });
+  const grbl = new Grbl(f.session);
+  assert.deepEqual(['X', 'Y', 'Z'].map(axis => grbl.maxRate(axis)), [3000, 3000, 2000]);
+  assert.equal(f.session.settings.settings.$13, '0');
+  assert.equal(f.session.settings.settings.$100, '160.000');
+  f.socket.receive('serialport:read', '[VER:3.7 FluidNC v3.7.8:]');
+  assert.equal(stopCommands(f).length, 2);
+});
+
+test('GRBL controllers never receive FluidNC config queries', () => {
+  const complete = fixture();
+  joinWithController(complete, { $13: '0', $110: '500', $111: '500', $112: '300' });
+  assert.deepEqual(stopCommands(complete), []);
+  const pending = fixture();
+  joinWithController(pending, {});
+  pending.socket.receive('serialport:read', '[VER:1.1h.20190825:]');
+  assert.deepEqual(stopCommands(pending), [['gcode', '$I']]);
+});
+
 function report(f, state) {
   f.socket.receive('serialport:read', `<${state}|MPos:0,0,0|FS:0,0>`);
 }
