@@ -559,24 +559,59 @@ test('a Step below physical/report resolution completes after two requested Idle
   assert.equal(f.jobs.size,0); assert.equal(f.grbl.jogPhase,'idle');
 });
 
-test('queued out-and-back Steps require the final jog ACK and two later Idle reports',()=>{
+test('out-and-back Steps merge until the controller acknowledges the first and complete after its ACK and two Idle reports',()=>{
   const f=gatedJogFixture('delayed');
   f.socket.receive('serialport:write','G4 P2\n',{source:'feeder'});
-  f.grbl.jog('X',0.04,250); f.grbl.jog('X',-0.04,250);
-  const commands=stopCommands(f).filter(([name])=>name==='gcode');
+  assert.equal(f.grbl.jog('X',0.04,250),'sent');
+  assert.equal(f.grbl.jog('X',-0.03,250),'buffered');
+  assert.equal(f.grbl.jog('X',-0.01,250),'buffered');
+  const gcode=()=>stopCommands(f).filter(([name])=>name==='gcode');
+  const write=([,code,context])=>f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
   f.tick(); f.tick(); f.tick();
+  assert.equal(gcode().length,1,'Merged input waits while the first line is unsent');
   assert.equal(f.grbl.jogCompleted(),false);
   assert.equal(f.grbl.jogPhase,'active');
+  write(gcode()[0]);
   f.socket.receive('serialport:read','ok'); // Earlier dwell, not a jog.
-  for(const [,code,context] of commands) f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
+  f.tick();
+  assert.equal(gcode().length,1,'A written line the controller has not acknowledged still holds merged input');
   f.socket.receive('serialport:read','ok');
+  f.tick();
+  assert.deepEqual(gcode().map(([,code])=>code),['$J=G21 G91 X0.0400 F250.000','$J=G21 G91 X-0.0400 F250.000']);
+  write(gcode()[1]);
   f.tick(); f.tick();
-  assert.equal(f.grbl.jogCompleted(),false,'The first jog ACK cannot acknowledge the second');
+  assert.equal(f.grbl.jogCompleted(),false,'The first jog ACK cannot acknowledge the merged line');
   f.socket.receive('serialport:read','ok');
   assert.equal(f.grbl.jogCompleted(),false,'Old Idle reports cannot complete an acknowledged jog');
   f.tick(); assert.equal(f.grbl.jogCompleted(),false);
   f.tick(); assert.equal(f.grbl.jogCompleted(),true);
   f.tick(); assert.equal(f.jobs.size,0);
+});
+
+test('a fast wheel keeps one unacknowledged jog line in flight and preserves every detent',()=>{
+  const f=gatedJogFixture('delayed');
+  const gcode=()=>stopCommands(f).filter(([name])=>name==='gcode');
+  const write=([,code,context])=>f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
+  // CNCjs writes a lone line immediately; the controller's ok is the only backpressure.
+  for(let i=0;i<20;i++) { f.grbl.jog('X',0.1,250); if(i===0) write(gcode()[0]); }
+  f.tick();
+  assert.equal(gcode().length,1);
+  f.socket.receive('serialport:read','ok');
+  // The first detent after the ok sends the merge at once; later ones wait again.
+  for(let i=0;i<5;i++) f.grbl.jog('X',0.1,250);
+  f.tick();
+  assert.deepEqual(gcode().map(([,code])=>code),['$J=G21 G91 X0.1000 F250.000','$J=G21 G91 X2.0000 F250.000']);
+  write(gcode()[1]); f.tick();
+  assert.equal(gcode().length,2);
+  f.socket.receive('serialport:read','ok'); f.tick();
+  assert.equal(gcode().at(-1)[1],'$J=G21 G91 X0.4000 F250.000');
+  assert.equal(f.grbl.jogTarget.value,2.5,'Every detent travels: 25 x 0.1 mm');
+  for(let i=0;i<3;i++) f.grbl.jog('X',0.1,250);
+  f.grbl.cancelJog();
+  f.tick();
+  assert.equal(gcode().length,3,'Cancellation discards merged input that was never sent');
+  assert.equal(f.grbl.jogBacklog,null);
+  assert.ok(stopCommands(f).some(([name])=>name==='feeder:stop'));
 });
 
 test('mode cancellation remains armed while net-zero Steps are still queued',()=>{
@@ -724,7 +759,12 @@ test('passive queued jogs still clear owned feeder commands and resume wheel inp
   f.grbl.jog('X',0.001,250);
   f.tick(); f.tick(); f.tick();
   assert.equal(f.grbl.jogPhase,'armed');
-  assert.equal(f.grbl.jog('X',0.04,250),'sent');
+  assert.equal(f.grbl.jog('X',0.04,250),'buffered');
+  const [,code,context]=stopCommands(f).findLast(([name])=>name==='gcode');
+  f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
+  f.tick(); assert.equal(f.grbl.jogPhase,'armed');
+  f.socket.receive('serialport:read','ok');
+  f.tick();
   assert.equal(f.grbl.jogPhase,'active');
   assert.equal(f.grbl.jogTarget.value,0.041);
   f.grbl.cancelJog();
@@ -956,15 +996,17 @@ for(const travel of ['sub-resolution','out-and-back']) test(`unchanged dual-fram
   assert.equal(f.grbl.jogPhase,'idle'); assert.equal(f.jobs.size,0);
 });
 
-test('a rejected Step drains owned jogs, confirms Idle, and recovers without endless polling',()=>{
+test('a rejected Step drops merged input, confirms Idle, and recovers without endless polling',()=>{
   const f=gatedJogFixture('delayed'); f.grbl.jog('X',1,250);
   const [,code,context]=stopCommands(f).findLast(([name])=>name==='gcode');
   f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
-  f.grbl.jog('X',1,250); // A second owned line is still in the CNCjs feeder.
+  assert.equal(f.grbl.jog('X',1,250),'buffered'); // Held in the pendant until the first line's reply.
   f.socket.receive('serialport:read','error:15 (Jog target exceeds machine travel)');
   for(let i=0;i<5;i++) f.tick();
   assert.equal(f.grbl.jogPhase,'idle'); assert.equal(f.jobs.size,0);
-  assert.equal(stopCommands(f).filter(([name])=>name==='feeder:stop').length,1);
+  assert.equal(f.grbl.jogBacklog,null);
+  assert.equal(stopCommands(f).filter(([name])=>name==='gcode').length,1,'The merged Step after a rejection is never sent');
+  assert.equal(stopCommands(f).filter(([name])=>name==='feeder:stop').length,0,'No owned line remains in the CNCjs feeder');
   assert.equal(stopCommands(f).filter(([name])=>name==='jogCancel').length,1);
   assert.equal(f.grbl.jog('Y',0.04,250),'sent');
   f.grbl.clearJog();

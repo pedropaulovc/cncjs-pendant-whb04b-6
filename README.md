@@ -178,6 +178,12 @@ and `npm pack` build the pinned parser automatically and include its license.
 - **Step:** each detent moves 0.001, 0.01, 0.1, 1, 5, or 10 mm according to the
   selector. The last two positions require **5/10 mm steps → Enabled**, matching
   LinuxCNC's opt-in big-step option. A step finishes after the wheel stops.
+  Only one Step line waits for the controller's `ok` at a time. Detents turned
+  meanwhile are merged into a single line sent when that `ok` arrives, so a fast
+  wheel cannot overrun the controller's serial or planner buffers. Every detent
+  still travels its full distance: turning faster than the step feed means
+  motion continues after the wheel stops. Stop, or changing mode or axis,
+  discards merged detents that were not yet sent.
 - **Continuous:** the selector chooses 2, 5, 10, 30, 60, or 100% of the selected
   axis's GRBL maximum rate (`$110`–`$112`). Motion is issued as one outstanding
   segment with 200 ms of travel at that feed; a 180 ms gap between wheel reports cancels
