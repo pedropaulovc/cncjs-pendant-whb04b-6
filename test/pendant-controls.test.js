@@ -215,6 +215,30 @@ test('two in-flight Idle reports at the old position cannot admit another Contin
   f.input({jog:1}); assert.equal(f.commands.filter(([c])=>c==='gcode').length,2);
 });
 
+test('a jog the controller clips at a soft limit stops polling once Idle settles and admits the next jog', () => {
+  // FluidNC clips jogs to the soft-limit range: at the limit it acknowledges
+  // the jog with ok, never leaves Idle, and the position never changes.
+  for (const [replyTracking, receiptState, notice] of [
+    ['synchronized', 'acknowledged', /Z jog ended short of its target/],
+    ['unknown', 'uncertain', /Jog completion cannot be confirmed/],
+  ]) {
+    const f=fixture(); f.session.replyTracking=replyTracking; f.session.positionReport={...f.session.positionReport,values:[0,0,-356]};
+    f.session.jog=code=>{ f.session.command('gcode',code); return {state:receiptState,transmission:'written',reportSequence:f.session.reportSequence}; };
+    assert.equal(f.grbl.jog('Z',-1,100),'sent');
+    const report=()=>{ f.session.reportSequence++; f.session.idleReports++; f.session.positionReport={...f.session.positionReport,sequence:f.session.reportSequence}; f.timer.advance(100); };
+    const polls=()=>f.commands.filter(([c])=>c==='statusreport').length;
+    for(let i=0;i<4;i++) report();
+    assert.equal(f.timer.timers.size,1,replyTracking);
+    report();
+    assert.equal(f.timer.timers.size,0,replyTracking);
+    const settled=polls(); f.timer.advance(1000);
+    assert.equal(polls(),settled,replyTracking);
+    assert.match(f.logs.at(-1),notice);
+    assert.equal(f.grbl.jog('Z',1,100),'sent',replyTracking);
+    assert.equal(f.commands.filter(([c])=>c==='gcode').length,2,replyTracking);
+  }
+});
+
 test('Continuous endpoint confirmation converts $13 inch reports to mm and supports WPos', () => {
   const f=fixture(); f.session.positionReport={kind:'WPos',values:[1,2,3],sequence:1,units:'1',resolution:0.0001};
   assert.equal(f.grbl.jogPulse('X',2.54,100),'sent');
