@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [3.2.1] - 2026-11-01
+
+### Fixed
+
+- A jog the controller clips at a soft limit no longer leaves the pendant polling status every 100 ms until Stop. FluidNC acknowledges a clipped jog with `ok` and stays Idle short of the target; after five settled Idle reports the pendant ends the jog and logs that it stopped short. Without trusted acknowledgements it pauses polling and keeps cancellation armed instead.
+
 ## [3.2.0] - 2026-10-30
 
 ### Added

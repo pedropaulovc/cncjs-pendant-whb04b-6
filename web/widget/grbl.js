@@ -1,4 +1,9 @@
 // GRBL 1.1 commands through the already-joined CNCjs session.
+// Consecutive Idle reports after the last jog's ok that prove the controller
+// finished it short of its target. Two reports can still be in flight from
+// before the jog started, so stopping short needs more evidence than that.
+const SETTLED_IDLE_REPORTS = 5;
+
 export class Grbl {
   constructor(session, getProbeThickness = () => 20, log = () => {}, { schedule = (fn, ms) => setTimeout(fn, ms), cancel = id => clearTimeout(id), now = () => performance.now() } = {}) {
     Object.assign(this, { session, getProbeThickness, log, schedule, cancel, now });
@@ -14,6 +19,7 @@ export class Grbl {
     this.jogTimer = null;
     this.jogTarget = null;
     this.jogCompletionNotice = 'none';
+    this.jogShortNotice = 'none';
     this.spindleDirectionMode = 'M3';
   }
   get state() { return this.session.state || {}; }
@@ -163,8 +169,25 @@ export class Grbl {
     // by two fresh Idle reports: a dwell can report Idle before queued jogs run.
     if (Math.abs(this.jogTarget.value - this.jogTarget.start) <= 2 * tolerance
       && Math.abs(position.value - this.jogTarget.value) <= 2 * tolerance) return this.unmeasuredJogCompleted(acknowledgedIdle);
-    if (position.sequence <= this.jogPositionSequence || Math.abs(position.value - this.jogTarget.start) < tolerance) return false;
-    return Math.abs(position.value - this.jogTarget.value) <= tolerance;
+    const fresh = position.sequence > this.jogPositionSequence && Math.abs(position.value - this.jogTarget.start) >= tolerance;
+    if (fresh && Math.abs(position.value - this.jogTarget.value) <= tolerance) return true;
+    return this.jogStoppedShort(position);
+  }
+  // FluidNC clips jogs to the soft-limit range and acknowledges them with ok,
+  // so a clipped jog never reaches its target and never reports an error.
+  jogStoppedShort(position) {
+    const settled = this.session.idleReports >= SETTLED_IDLE_REPORTS && this.session.reportSequence >= this.jogSequence + SETTLED_IDLE_REPORTS;
+    if (!settled) return false;
+    const acknowledged = this.jogReceipt?.state === 'acknowledged'
+      && this.session.reportSequence >= this.jogReceipt.reportSequence + SETTLED_IDLE_REPORTS;
+    // Without trusted acknowledgements the jog may still wait behind a dwell:
+    // stop polling but keep cancellation armed, as for unmeasured jogs.
+    if (!acknowledged) return this.unmeasuredJogCompleted(false);
+    if (this.jogShortNotice === 'none') {
+      this.jogShortNotice = 'shown';
+      this.log(`${this.jogTarget.axis} jog ended short of its target at ${position.value.toFixed(3)} (target ${this.jogTarget.value.toFixed(3)} ${position.kind}); the controller clipped it, most likely at a soft limit.`);
+    }
+    return true;
   }
   unmeasuredJogCompleted(acknowledgedIdle) {
     if (this.session.replyTracking === 'unknown'
@@ -270,6 +293,7 @@ export class Grbl {
     if (receipt.state === 'dropped') return 'dropped';
     this.jogReceipt = receipt;
     this.jogPhase = 'active';
+    this.jogShortNotice = 'none';
     this.jogGeneration = this.session.generation;
     this.jogEpoch = this.session.motionEpoch;
     this.jogWorkflowEpoch = this.session.workflowEpoch;
