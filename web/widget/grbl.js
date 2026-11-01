@@ -20,6 +20,9 @@ export class Grbl {
     this.jogTarget = null;
     this.jogCompletionNotice = 'none';
     this.jogShortNotice = 'none';
+    this.jogAxis = null;
+    this.jogBacklog = null;
+    this.backlogTimer = null;
     this.spindleDirectionMode = 'M3';
   }
   get state() { return this.session.state || {}; }
@@ -157,7 +160,7 @@ export class Grbl {
     return { kind: report.kind, units, value: value * scale, resolution: report.resolution * scale + stepRounding, sequence: report.sequence };
   }
   jogCompleted() {
-    if (this.activeState !== 'Idle') return false;
+    if (this.jogBacklog || this.activeState !== 'Idle') return false;
     const acknowledgedIdle = this.jogReceipt?.state === 'acknowledged'
       && this.session.reportSequence >= this.jogReceipt.reportSequence + 2 && this.session.idleReports >= 2;
     if (!this.jogTarget) return this.unmeasuredJogCompleted(acknowledgedIdle);
@@ -203,10 +206,57 @@ export class Grbl {
   clearJog() {
     if (this.jogTimer !== null) this.cancel(this.jogTimer);
     this.jogTimer = null;
+    this.dropBacklog();
     this.jogPhase = 'idle';
     this.jogTarget = null;
     this.jogReceipt = null;
     this.jogCompletionNotice = 'none';
+  }
+  dropBacklog() {
+    if (this.backlogTimer !== null) this.cancel(this.backlogTimer);
+    this.backlogTimer = null;
+    this.jogBacklog = null;
+  }
+  // CNCjs's feeder writes a lone queued line at once, without waiting for the
+  // controller's ok, so rapid Steps would overrun the controller's serial and
+  // planner buffers. Hold later wheel input until the controller replies to the
+  // last owned line, then send it as one merged line.
+  jogAwaitingReply() {
+    return ['queued', 'written'].includes(this.jogReceipt?.state);
+  }
+  bufferJog(axis, distance, feed) {
+    const total = Number(((this.jogBacklog?.distance ?? 0) + Number(distance.toFixed(4))).toFixed(4));
+    this.jogBacklog = { axis, distance: total, feed };
+    if (this.jogAwaitingReply()) { this.flushBacklog(); return 'buffered'; }
+    return this.sendBacklog();
+  }
+  flushBacklog() {
+    if (this.backlogTimer !== null) return;
+    this.backlogTimer = this.schedule(() => {
+      this.backlogTimer = null;
+      if (!this.jogBacklog) return;
+      if (this.jogAwaitingReply()) { this.flushBacklog(); return; }
+      this.sendBacklog();
+    }, 50);
+  }
+  // Only the controller's reply to the line a backlog waited behind releases
+  // it. A reset, program, Stop, or rejection ends that motion session, and the
+  // merged detents must never start motion without fresh wheel input.
+  backlogReleased() {
+    return !this.jogSessionChanged() && ['acknowledged', 'uncertain'].includes(this.jogReceipt?.state);
+  }
+  sendBacklog() {
+    const backlog = this.jogBacklog;
+    this.dropBacklog();
+    if (!this.backlogReleased()) {
+      this.log(`Step: discarded ${backlog.distance.toFixed(4)} mm of merged ${backlog.axis} wheel input; the jog was interrupted.`);
+      return 'dropped';
+    }
+    // Detents that returned to their start cancel out; nothing to send.
+    if (Math.abs(backlog.distance) < 0.00005) return 'buffered';
+    const result = this.jog(backlog.axis, backlog.distance, backlog.feed);
+    if (result === 'dropped') this.log(`Step: discarded ${backlog.distance.toFixed(4)} mm of merged ${backlog.axis} wheel input.`);
+    return result;
   }
   jogSessionChanged() {
     return this.jogGeneration !== this.session.generation || this.jogEpoch !== this.session.motionEpoch
@@ -241,6 +291,7 @@ export class Grbl {
   cancelJog(cause = 'operator') {
     if (cause === 'operator' && this.recoverJogError() === 'recovering') return;
     if (!['active', 'armed'].includes(this.jogPhase)) return;
+    this.dropBacklog();
     this.jogPhase = 'idle';
     if (this.jogSessionChanged() || this.session.workflowState !== 'idle' || (cause === 'operator' && this.jogCompleted())) { this.clearJog(); return; }
     // Once the last owned line was written, no owned commands remain in the
@@ -277,6 +328,13 @@ export class Grbl {
     if (!this.manualReady('allow-jog')) return this.refuse('Jog: controller must be idle or jogging with no running program.');
     const max = this.maxRate(axis);
     if (!max) return this.refuse(`Jog: waiting for GRBL ${axis} maximum-rate setting.`);
+    // At most one owned line awaits the controller's reply; later wheel input on
+    // the same axis merges and goes out once that reply arrives. Input arriving
+    // before the timer sends the merge joins it, keeping detents in order.
+    if (this.jogBacklog?.axis === axis
+      || (['active', 'armed'].includes(this.jogPhase) && this.jogAxis === axis && this.jogAwaitingReply())) {
+      return this.bufferJog(axis, distance, feed);
+    }
     let pending = ['active', 'armed'].includes(this.jogPhase) && !this.jogCompleted() && this.jogTarget?.axis === axis ? this.jogTarget : null;
     // Passive ownership may outlive a separate CNCjs move or coordinate change.
     // Rebase the next Step on fresh feedback once all owned lines were written;
@@ -293,6 +351,7 @@ export class Grbl {
     if (receipt.state === 'dropped') return 'dropped';
     this.jogReceipt = receipt;
     this.jogPhase = 'active';
+    this.jogAxis = axis;
     this.jogShortNotice = 'none';
     this.jogGeneration = this.session.generation;
     this.jogEpoch = this.session.motionEpoch;

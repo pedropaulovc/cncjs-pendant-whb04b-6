@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [3.2.2] - 2026-11-01
+
+### Fixed
+
+- Turning the wheel quickly in Step mode no longer floods the controller with one `$J` line per detent. CNCjs writes a single queued line to serial without waiting for the controller's `ok`, so a full planner made those lines pile up past the controller's buffers. The pendant now keeps one Step line awaiting the controller's reply and merges later detents into one line sent when that reply arrives. Total travel is unchanged; Stop and mode or axis changes discard merged detents that were not yet sent.
+
 ## [3.2.1] - 2026-11-01
 
 ### Fixed
