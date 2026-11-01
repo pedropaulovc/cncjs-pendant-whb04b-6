@@ -614,6 +614,25 @@ test('a fast wheel keeps one unacknowledged jog line in flight and preserves eve
   assert.ok(stopCommands(f).some(([name])=>name==='feeder:stop'));
 });
 
+for(const [event,trigger] of [
+  ['a controller reset',f=>{ f.socket.receive('serialport:read','Grbl 1.1h'); f.broadcast(); }],
+  ['program activity',f=>{ f.socket.receive('workflow:state','running'); f.socket.receive('workflow:state','idle'); }],
+]) test(`merged Step detents are discarded, never sent, after ${event}`,()=>{
+  const f=gatedJogFixture('delayed');
+  const gcode=()=>stopCommands(f).filter(([name])=>name==='gcode');
+  f.grbl.jog('X',0.1,250);
+  const [,code,context]=gcode()[0];
+  f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
+  for(let i=0;i<20;i++) assert.equal(f.grbl.jog('X',0.1,250),'buffered');
+  trigger(f);
+  // The 50 ms backlog timer fires before the 100 ms jog poller notices the change.
+  const backlogTimer=f.grbl.backlogTimer; assert.ok(f.jobs.has(backlogTimer));
+  f.jobs.delete(backlogTimer); backlogTimer();
+  for(let i=0;i<4;i++) f.tick();
+  assert.equal(gcode().length,1,'No motion may start without new wheel input');
+  assert.equal(f.grbl.jogBacklog,null);
+});
+
 test('mode cancellation remains armed while net-zero Steps are still queued',()=>{
   const f=gatedJogFixture('delayed');
   f.grbl.jog('X',0.04,250); f.grbl.jog('X',-0.04,250);

@@ -239,9 +239,19 @@ export class Grbl {
       this.sendBacklog();
     }, 50);
   }
+  // Only the controller's reply to the line a backlog waited behind releases
+  // it. A reset, program, Stop, or rejection ends that motion session, and the
+  // merged detents must never start motion without fresh wheel input.
+  backlogReleased() {
+    return !this.jogSessionChanged() && ['acknowledged', 'uncertain'].includes(this.jogReceipt?.state);
+  }
   sendBacklog() {
     const backlog = this.jogBacklog;
     this.dropBacklog();
+    if (!this.backlogReleased()) {
+      this.log(`Step: discarded ${backlog.distance.toFixed(4)} mm of merged ${backlog.axis} wheel input; the jog was interrupted.`);
+      return 'dropped';
+    }
     // Detents that returned to their start cancel out; nothing to send.
     if (Math.abs(backlog.distance) < 0.00005) return 'buffered';
     const result = this.jog(backlog.axis, backlog.distance, backlog.feed);
