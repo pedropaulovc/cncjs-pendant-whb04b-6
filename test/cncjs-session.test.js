@@ -3,24 +3,6 @@ import assert from 'node:assert/strict';
 import { CncjsSession, isParentMessage } from '../web/widget/cncjs-session.js';
 import { Grbl } from '../web/widget/grbl.js';
 
-test('default timers use the browser-compatible receiver', (t) => {
-  const timerId = {};
-  let cancelled;
-  t.mock.method(globalThis, 'setInterval', function () {
-    assert.ok(this === undefined || this === globalThis);
-    return timerId;
-  });
-  t.mock.method(globalThis, 'clearInterval', function (id) {
-    assert.ok(this === undefined || this === globalThis);
-    cancelled = id;
-  });
-  const socket = { on() {}, disconnect() {} };
-  const session = new CncjsSession({ io: () => socket, origin: 'http://localhost' });
-  session.connect('token');
-  assert.equal(session.timer, timerId);
-  session.disconnect();
-  assert.equal(cancelled, timerId);
-});
 
 function fixture() {
   const emitted = [];
@@ -371,7 +353,7 @@ test('port close disarms commands and resumes discovery without closing hardware
 
 test('jog and fixed-distance macros use mm even after a prior G20 command', (t) => {
   const commands = [];
-  const grbl = new Grbl({ command: (...args) => commands.push(args), status: { phase: 'joined' },
+  const grbl = new Grbl({ command: (...args) => commands.push(args), status: { phase: 'joined' }, subscribeMotion: () => () => {},
     jog: code => { commands.push(['gcode', code]); return { state: 'queued' }; },
     stopPhase: 'idle', workflowState: 'idle', activeState: 'Idle', settings: { settings: { $110: '3000' } } }, () => 12.5);
   t.after(() => grbl.clearJog());
@@ -475,23 +457,70 @@ function gatedJogFixture(acknowledgements = 'immediate') {
   f.socket.receive('serialport:read','Grbl 1.1h');
   f.socket.receive('controller:settings','Grbl',{settings:{$13:'0',$110:'3000',$111:'3000',$112:'1000'}});
   const machine={state:'Idle',x:0,y:0,z:0};
-  const broadcast=()=>f.socket.receive('controller:state','Grbl',{status:{activeState:machine.state,mpos:Object.fromEntries(['x','y','z'].map(axis=>[axis,machine[axis].toFixed(3)]))}});
+  let lastStatus;
+  const broadcast=(parserstate)=>{
+    const status={activeState:machine.state,mpos:Object.fromEntries(['x','y','z'].map(axis=>[axis,machine[axis].toFixed(3)]))};
+    const serialized=JSON.stringify(status);
+    if(serialized===lastStatus && !parserstate && f.session.positionReport) return;
+    lastStatus=serialized;
+    f.socket.receive('controller:state','Grbl',{status,...(parserstate?{parserstate}:{})});
+  };
   broadcast();
-  const jobs=new Set(), logs=[];
-  const grbl=new Grbl(f.session,()=>20,message=>logs.push(message), {schedule:fn=>{jobs.add(fn);return fn;},cancel:fn=>jobs.delete(fn)});
+  const jobs=new Set(), deadlines=new Map(), logs=[], deliveries=[];
+  let time=0, sending=0, delivering=false;
+  const drain=()=>{
+    if(sending || delivering) return;
+    delivering=true;
+    try { while(deliveries.length) deliveries.shift()(); } finally { delivering=false; }
+  };
+  const motionListeners=new Set(), subscribe=f.session.subscribeMotion.bind(f.session);
+  f.session.subscribeMotion=listener=>{
+    motionListeners.add(listener);
+    const unsubscribe=subscribe(listener);
+    return ()=>{motionListeners.delete(listener);unsubscribe();};
+  };
+  const grbl=new Grbl(f.session,()=>20,message=>logs.push(message), {
+    now:()=>time,
+    schedule:(fn,ms)=>{jobs.add(fn);deadlines.set(fn,time+ms);return fn;},
+    cancel:fn=>{jobs.delete(fn);deadlines.delete(fn);},
+  });
+  // Real socket feedback arrives after the command stack unwinds. Preserve that
+  // boundary even though this deterministic fixture uses synchronous listeners.
+  for(const name of ['jog','jogPulse','cancelJog']) {
+    const method=grbl[name].bind(grbl);
+    grbl[name]=(...args)=>{
+      sending++;
+      try { return method(...args); } finally { sending--; drain(); }
+    };
+  }
   const emit=f.socket.emit.bind(f.socket);
+  let rawResponses=true;
   f.socket.emit=(...args)=>{
     emit(...args);
-    if(acknowledgements==='immediate' && args[0]==='command' && args[2]==='gcode') {
+    if(acknowledgements==='immediate' && args[0]==='command' && args[2]==='gcode') deliveries.push(()=>{
       f.socket.receive('serialport:write',`${args[3]}\n`,{...args[4],source:'feeder'});
       f.socket.receive('serialport:read','ok');
-    }
-    // Match CNCjs: its automatic status polls never forward serialport:read.
-    if(args[0]==='command' && args[2]==='statusreport') f.socket.receive('serialport:read',`<${machine.state}|MPos:${machine.x.toFixed(3)},${machine.y.toFixed(3)},${machine.z.toFixed(3)}|FS:0,0>`);
+    });
+    // Native CNCjs status is changed-state-only; only an explicit pendant query
+    // forwards a raw response, including repeated identical Idle reports.
+    if(rawResponses && args[0]==='command' && args[2]==='statusreport') deliveries.push(()=>
+      f.socket.receive('serialport:read',`<${machine.state}|MPos:${machine.x.toFixed(3)},${machine.y.toFixed(3)},${machine.z.toFixed(3)}|FS:0,0>`));
     return f.socket;
   };
-  const tick=()=>{for(const fn of [...jobs]) { jobs.delete(fn); fn(); }};
-  return {...f,grbl,machine,broadcast,jobs,tick,logs};
+  const tick=(delay)=>{
+    const next=[...jobs].filter(fn=>delay===undefined || deadlines.get(fn)-time===delay)
+      .sort((a,b)=>deadlines.get(a)-deadlines.get(b))[0];
+    if(!next) { if(delay!==undefined) assert.fail(`No timer scheduled in ${delay} ms`); return; }
+    time=deadlines.get(next); jobs.delete(next); deadlines.delete(next); next(); drain();
+  };
+  const advance=ms=>{
+    const end=time+ms;
+    while([...jobs].some(fn=>deadlines.get(fn)<=end)) tick();
+    time=end;
+  };
+  return {...f,grbl,machine,broadcast,jobs,tick,advance,logs,drain,motionListeners,
+    rawResponses:enabled=>{rawResponses=enabled;},
+    queries:()=>stopCommands(f).filter(([name])=>name==='statusreport').length};
 }
 
 test('automatic controller-state endpoint releases completed Step before a raw poll arrives',()=>{
@@ -503,36 +532,43 @@ test('automatic controller-state endpoint releases completed Step before a raw p
   assert.equal(stopCommands(f).some(([name])=>name==='jogCancel'),false);
   assert.equal(f.grbl.jog('Y',0.04,250),'sent');
   assert.equal(f.session.reportSequence,0);
-  assert.equal(f.jobs.size,1);
   f.grbl.clearJog();
 });
 
-test('Step actively requests raw completion reports and stops its only poller on completion',()=>{
+test('an ambiguous Idle starts only a delayed bounded raw confirmation burst',()=>{
   const f=gatedJogFixture(); f.grbl.jog('X',0.04,250);
+  assert.equal(f.queries(),0);
   f.machine.x=0.04;
-  f.tick(); assert.equal(f.session.reportSequence,1);
-  f.tick(); assert.equal(f.jobs.size,0); assert.equal(f.grbl.jogPhase,'idle');
-  assert.equal(stopCommands(f).filter(([name])=>name==='statusreport').length,1);
+  f.tick(750);
+  assert.equal(f.session.reportSequence,1);
+  assert.equal(f.grbl.jogPhase,'idle');
+  assert.equal(f.queries(),1);
+  assert.equal(f.jobs.size,0);
+  assert.equal(f.motionListeners.size,0);
 });
 
 test('jog cancellation requests both raw Idle reports without an unrelated query',()=>{
   const f=gatedJogFixture(); f.grbl.jog('X',1,250);
   f.machine.state='Jog'; f.broadcast(); f.grbl.cancelJog();
-  assert.equal(f.session.reportSequence,1);
-  f.machine.state='Idle'; f.machine.x=0.02;
-  f.tick(); assert.equal(f.grbl.jogPhase,'canceling');
-  f.tick(); f.tick();
+  assert.equal(f.session.reportSequence,0,'Cancel must not query immediately');
+  f.machine.state='Idle'; f.machine.x=0.02; f.broadcast();
+  assert.equal(f.grbl.jogPhase,'canceling','Native Idle cannot replace two raw confirmations');
+  f.tick(750); assert.equal(f.grbl.jogPhase,'canceling');
+  f.tick(250);
   assert.equal(f.session.idleReports,2);
   assert.equal(f.jobs.size,0); assert.equal(f.grbl.jogPhase,'idle');
   assert.equal(f.grbl.jog('Y',0.04,250),'sent');
   f.grbl.clearJog();
 });
 
-for(const event of ['disconnect','reset','stop']) test(`jog poller is discarded on ${event}`,()=>{
+for(const event of ['disconnect','reset','stop','program']) test(`jog observation is discarded on ${event}`,()=>{
   const f=gatedJogFixture(); f.grbl.jog('X',1,250);
   if(event==='disconnect') f.session.disconnect();
   if(event==='reset') f.grbl.reset();
   if(event==='stop') f.grbl.stop();
+  if(event==='program') f.socket.receive('workflow:state','running');
+  assert.equal(f.jobs.size,0);
+  assert.equal(f.motionListeners.size,0);
   const count=stopCommands(f).length;
   f.tick(); assert.equal(f.jobs.size,0);
   assert.equal(stopCommands(f).length,count);
@@ -555,7 +591,10 @@ test('external controller reset discards the jog target without changing the Sto
 test('a Step below physical/report resolution completes after two requested Idle reports',()=>{
   const f=gatedJogFixture(); f.session.settings.settings.$100='200';
   f.grbl.jog('X',0.001,250);
-  f.tick(); f.tick(); f.tick();
+  assert.equal(f.queries(),0);
+  f.tick(750); assert.equal(f.grbl.jogPhase,'active');
+  f.tick(250);
+  assert.equal(f.queries(),2);
   assert.equal(f.jobs.size,0); assert.equal(f.grbl.jogPhase,'idle');
 });
 
@@ -565,9 +604,11 @@ test('out-and-back Steps merge until the controller acknowledges the first and c
   assert.equal(f.grbl.jog('X',0.04,250),'sent');
   assert.equal(f.grbl.jog('X',-0.03,250),'buffered');
   assert.equal(f.grbl.jog('X',-0.01,250),'buffered');
+  report(f,'Idle'); report(f,'Idle');
+  assert.equal(f.queries(),0,'A queued jog behind a dwell cannot query its way into completion');
   const gcode=()=>stopCommands(f).filter(([name])=>name==='gcode');
   const write=([,code,context])=>f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
-  f.tick(); f.tick(); f.tick();
+  f.tick(50); f.tick(50); f.tick(50);
   assert.equal(gcode().length,1,'Merged input waits while the first line is unsent');
   assert.equal(f.grbl.jogCompleted(),false);
   assert.equal(f.grbl.jogPhase,'active');
@@ -579,13 +620,13 @@ test('out-and-back Steps merge until the controller acknowledges the first and c
   f.tick();
   assert.deepEqual(gcode().map(([,code])=>code),['$J=G21 G91 X0.0400 F250.000','$J=G21 G91 X-0.0400 F250.000']);
   write(gcode()[1]);
-  f.tick(); f.tick();
+  report(f,'Idle'); report(f,'Idle');
   assert.equal(f.grbl.jogCompleted(),false,'The first jog ACK cannot acknowledge the merged line');
   f.socket.receive('serialport:read','ok');
   assert.equal(f.grbl.jogCompleted(),false,'Old Idle reports cannot complete an acknowledged jog');
-  f.tick(); assert.equal(f.grbl.jogCompleted(),false);
-  f.tick(); assert.equal(f.grbl.jogCompleted(),true);
-  f.tick(); assert.equal(f.jobs.size,0);
+  f.tick(750); assert.equal(f.grbl.jogCompleted(),false);
+  f.tick(250); assert.equal(f.grbl.jogPhase,'idle');
+  assert.equal(f.jobs.size,0);
 });
 
 test('a fast wheel keeps one unacknowledged jog line in flight and preserves every detent',()=>{
@@ -624,10 +665,10 @@ for(const [event,trigger] of [
   const [,code,context]=gcode()[0];
   f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
   for(let i=0;i<20;i++) assert.equal(f.grbl.jog('X',0.1,250),'buffered');
+  const backlogTimer=f.grbl.backlogTimer;
   trigger(f);
-  // The 50 ms backlog timer fires before the 100 ms jog poller notices the change.
-  const backlogTimer=f.grbl.backlogTimer; assert.ok(f.jobs.has(backlogTimer));
-  f.jobs.delete(backlogTimer); backlogTimer();
+  // Even a captured callback canceled by the subscription must stay harmless.
+  backlogTimer();
   for(let i=0;i<4;i++) f.tick();
   assert.equal(gcode().length,1,'No motion may start without new wheel input');
   assert.equal(f.grbl.jogBacklog,null);
@@ -655,12 +696,12 @@ test('unrelated MDI and manual parser-query replies cannot acknowledge a pendant
   f.socket.receive('serialport:read','ok');
   f.socket.receive('serialport:read','[GC:G0 G54 G17 G21 G90 G94 M5 M9 T0 F0 S0]');
   f.socket.receive('serialport:read','ok');
-  f.tick(); f.tick();
+  report(f,'Idle'); report(f,'Idle');
   assert.equal(f.grbl.jogReceipt.state,'written');
   assert.equal(f.grbl.jogCompleted(),false);
   f.socket.receive('serialport:read','ok');
   f.tick(); f.tick();
-  assert.equal(f.grbl.jogCompleted(),true);
+  assert.equal(f.grbl.jogPhase,'idle');
   f.grbl.clearJog();
 });
 
@@ -686,7 +727,7 @@ test('joining mid-flight cannot mistake an unseen old ACK for tiny-Step completi
   const [,code,context]=stopCommands(f).findLast(([name])=>name==='gcode');
   f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
   f.socket.receive('serialport:read','ok'); // Could belong to a pre-join dwell.
-  f.tick(); f.tick(); f.tick(); f.tick();
+  f.tick(750); f.tick(250);
   assert.equal(f.grbl.jogCompleted(),false);
   assert.equal(f.grbl.jogPhase,'armed');
   assert.equal(f.jobs.size,0);
@@ -749,7 +790,7 @@ for(const command of ['$g','$ G']) test(`normalized parser query ${command} cann
   f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
   f.socket.receive('serialport:read','ok');
   assert.equal(f.grbl.jogReceipt.state,'acknowledged');
-  f.tick(); f.tick(); f.tick();
+  f.tick(750); f.tick(250);
   assert.equal(f.grbl.jogPhase,'idle');
 });
 
@@ -760,7 +801,7 @@ for(const position of ['known','missing']) test(`uncertain ${position}-position 
   f.grbl.jog('X',position==='known'?0.001:1,250);
   assert.equal(f.grbl.jogReceipt.state,'uncertain');
   assert.equal(f.grbl.jogReceipt.transmission,'written');
-  for(let n=0;n<600;n++) f.tick();
+  f.tick(750); f.tick(250);
   assert.equal(f.grbl.jogPhase,'armed');
   assert.equal(f.jobs.size,0);
   assert.equal(stopCommands(f).filter(([name])=>name==='statusreport').length,2);
@@ -950,7 +991,7 @@ for(const kind of ['MPos','WPos']) for(const order of ['raw-first','broadcast-fi
   assert.equal(f.grbl.jogTarget.kind,kind);
   if(order==='raw-first') { raw(0.04); broadcast(0.04); }
   if(order==='broadcast-first') { broadcast(0.04); raw(0.04); }
-  assert.equal(f.grbl.jogCompleted(),true);
+  assert.equal(f.grbl.jogPhase,'idle');
   f.grbl.cancelJog();
   assert.equal(stopCommands(f).some(([name])=>name==='jogCancel'),false);
   assert.equal(f.grbl.jog('Y',0.04,250),'sent');
@@ -997,7 +1038,7 @@ test('both frame caches retain their own reporting units and are cleared on rese
   assert.deepEqual(f.session.positionReports,{});
 });
 
-for(const travel of ['sub-resolution','out-and-back']) test(`unchanged dual-frame broadcasts release ${travel} Step polling`,()=>{
+for(const travel of ['sub-resolution','out-and-back']) test(`unchanged dual-frame ${travel} needs bounded raw Idle confirmation`,()=>{
   const f=gatedJogFixture(); f.session.settings.settings.$100='200';
   const broadcast=()=>f.socket.receive('controller:state','Grbl',{status:{activeState:f.machine.state,
     mpos:{x:f.machine.x.toFixed(3),y:'0.000',z:'0.000'},
@@ -1007,11 +1048,14 @@ for(const travel of ['sub-resolution','out-and-back']) test(`unchanged dual-fram
   if(travel==='sub-resolution') f.grbl.jog('X',0.001,250);
   if(travel==='out-and-back') {
     f.grbl.jog('X',0.1,250); f.grbl.jog('X',-0.1,250);
-    f.machine.x=0.1; f.machine.state='Jog'; f.tick();
-    f.machine.x=0; f.machine.state='Idle';
+    f.machine.x=0.1; f.machine.state='Jog'; broadcast();
+    f.machine.x=0; f.machine.state='Idle'; broadcast();
   }
-  // Only raw MPos samples advance: both broadcasts finish at the old positions.
-  for(let i=0;i<4;i++) { f.tick(); broadcast(); }
+  // Changed frames establish motion; unchanged cached frames cannot prove that
+  // an out-and-back or sub-resolution command executed after its last ACK.
+  assert.equal(f.queries(),0);
+  f.tick(750); broadcast(); assert.equal(f.grbl.jogPhase,'active');
+  f.tick(250);
   assert.equal(f.grbl.jogPhase,'idle'); assert.equal(f.jobs.size,0);
 });
 
@@ -1037,11 +1081,11 @@ test('an error during an active segment drains motion and blocks new pulses thro
   f.socket.receive('serialport:read','error:15 (Travel exceeded)');
   assert.equal(f.grbl.jogPulse('X',1,250),'dropped');
   assert.equal(f.grbl.jogPhase,'canceling');
-  assert.match(f.logs.at(-2),/error:15.*canceling queued jogs/);
+  assert.ok(f.logs.some(line=>/error:15.*canceling queued jogs/.test(line)));
   for(let i=0;i<3;i++) f.tick();
   assert.equal(stopCommands(f).filter(([name])=>name==='gcode').length,1);
   assert.equal(f.grbl.jogPhase,'canceling');
-  f.machine.state='Idle'; f.machine.x=0.25;
+  f.machine.state='Idle'; f.machine.x=0.25; f.broadcast();
   f.tick(); assert.equal(f.grbl.jogPulse('X',1,250),'dropped');
   f.tick(); f.tick(); assert.equal(f.jobs.size,0);
   assert.equal(f.grbl.jogPulse('X',1,250),'sent');
@@ -1066,8 +1110,335 @@ test('errors outside owned motion and errors predating a jog do not cancel it',(
   f.socket.receive('serialport:read','error:20 (Unsupported command)');
   assert.equal(f.grbl.recoverJogError(),'unchanged');
   assert.equal(f.jobs.size,0);
-  f.grbl.jog('X',0.04,250); f.tick();
+  f.grbl.jog('X',0.04,250);
   assert.equal(f.grbl.jogPhase,'active');
   assert.equal(stopCommands(f).some(([name])=>name==='jogCancel'),false);
   f.grbl.clearJog();
+});
+
+for(const distances of [[1],[7,-1]]) test(`native ${distances.join('/')} mm F250 motion completes without extra status queries`,()=>{
+  const f=gatedJogFixture();
+  assert.equal(f.motionListeners.size,0,'No listener before pendant motion');
+  let endpoint=0;
+  for(const distance of distances) {
+    assert.equal(f.grbl.jog('X',distance,250),'sent');
+    endpoint+=distance;
+    for(let n=1;n<=12;n++) {
+      f.machine.state='Jog'; f.machine.x=endpoint-distance+distance*n/12; f.broadcast();
+      f.advance(250);
+      assert.equal(f.grbl.jogPhase,'active');
+      assert.equal(f.queries(),0,'Native progress must never trigger a pendant query');
+    }
+    f.machine.state='Idle'; f.broadcast();
+    assert.equal(f.grbl.jogPhase,'idle','Fresh endpoint Idle releases ownership immediately');
+    assert.equal(f.jobs.size,0);
+    assert.equal(f.motionListeners.size,0);
+  }
+  assert.equal(f.queries(),0);
+  assert.equal(f.session.reportSequence,0,'No raw feedback was needed');
+  assert.equal(stopCommands(f).filter(([name])=>name==='gcode').length,distances.length);
+});
+
+test('cached and parser-only broadcasts cannot count as fresh completion evidence',()=>{
+  const f=gatedJogFixture(); f.grbl.jog('X',0.001,250);
+  const sequence=f.session.positionReport.sequence;
+  for(let n=0;n<8;n++) f.broadcast({modal:{units:n%2?'G20':'G21'}});
+  assert.equal(f.session.positionReport.sequence,sequence);
+  assert.equal(f.session.reportSequence,0);
+  assert.equal(f.grbl.jogPhase,'active');
+  assert.equal(f.queries(),0);
+  f.tick(750); assert.equal(f.grbl.jogPhase,'active');
+  for(let n=0;n<8;n++) f.broadcast({modal:{units:'G21'}});
+  assert.equal(f.grbl.jogPhase,'active','Parser updates cannot replace the second raw Idle');
+  f.tick(250);
+  assert.equal(f.grbl.jogPhase,'idle');
+  assert.equal(f.queries(),2);
+});
+
+for(const endpoint of [0,0.25]) test(`clipped jog at ${endpoint} mm requires five post-ACK raw Idle confirmations`,()=>{
+  const f=gatedJogFixture(); f.grbl.jog('X',1,250);
+  if(endpoint) { f.machine.state='Jog'; f.machine.x=endpoint; f.broadcast(); }
+  f.machine.state='Idle'; f.broadcast();
+  assert.equal(f.queries(),0);
+  for(let n=0;n<5;n++) {
+    f.tick(n===0?750:250);
+    assert.equal(f.queries(),n+1);
+    assert.equal(f.grbl.jogPhase,n===4?'idle':'active');
+  }
+  assert.match(f.logs.at(-1),/ended short of its target/);
+  assert.equal(f.jobs.size,0);
+  assert.equal(f.motionListeners.size,0);
+});
+
+test('lost native moving feedback is bounded and never completes motion',()=>{
+  const f=gatedJogFixture();
+  f.grbl.jog('X',1,250);
+  f.machine.state='Jog'; f.machine.x=0.2; f.broadcast();
+  f.tick(3000);
+  assert.equal(f.grbl.jogPhase,'armed');
+  assert.equal(f.grbl.jogCompleted(),false);
+  assert.equal(f.queries(),0,'A watchdog cannot query or infer Idle');
+  assert.equal(f.jobs.size,0);
+  assert.equal(f.motionListeners.size,0);
+  assert.equal(f.logs.length,1);
+  for(let n=0;n<10;n++) f.tick();
+  assert.equal(f.logs.length,1);
+  f.grbl.clearJog();
+});
+
+test('an unanswered Idle confirmation burst stops after five requests without completing',()=>{
+  const f=gatedJogFixture(); f.rawResponses(false); f.grbl.jog('X',1,250);
+  for(let n=0;n<5;n++) f.tick(n===0?750:250);
+  for(let n=0;n<10;n++) f.tick();
+  assert.equal(f.queries(),5);
+  assert.equal(f.grbl.jogPhase,'armed');
+  assert.equal(f.grbl.jogCompleted(),false);
+  assert.equal(f.jobs.size,0);
+  assert.equal(f.motionListeners.size,0);
+  f.grbl.clearJog();
+});
+
+test('failed cancellation remains blocked and cached Idle cannot restart its bounded burst',()=>{
+  const f=gatedJogFixture(); f.grbl.jog('X',1,250);
+  f.grbl.cancelJog(); f.rawResponses(false);
+  assert.equal(f.queries(),0);
+  for(let n=0;n<5;n++) f.tick(n===0?750:250);
+  for(let n=0;n<8;n++) f.broadcast({modal:{units:'G21'}});
+  for(let n=0;n<10;n++) f.tick();
+  assert.equal(f.queries(),5);
+  assert.equal(f.grbl.jogPhase,'canceling');
+  assert.equal(f.jobs.size,0);
+  assert.equal(f.grbl.jog('Y',1,250),'dropped');
+  f.machine.state='Jog'; f.machine.x=0.1; f.broadcast();
+  assert.equal(f.queries(),5,'Fresh progress does not query while moving');
+  f.rawResponses(true); f.machine.state='Idle'; f.broadcast();
+  f.tick(750); assert.equal(f.grbl.jogPhase,'canceling');
+  f.tick(250);
+  assert.equal(f.grbl.jogPhase,'idle');
+  assert.equal(f.jobs.size,0);
+  assert.equal(f.motionListeners.size,0);
+});
+
+test('fresh native progress interrupts a confirmation burst until a new Idle ambiguity delay',()=>{
+  const f=gatedJogFixture(); f.grbl.jog('X',1,250);
+  f.tick(750); assert.equal(f.queries(),1);
+  f.machine.state='Jog'; f.machine.x=0.2; f.broadcast();
+  assert.equal(f.queries(),1);
+  f.machine.x=0.3; f.broadcast();
+  f.machine.state='Idle'; f.machine.x=0.4; f.broadcast();
+  f.tick(750); assert.equal(f.queries(),2);
+  for(let n=0;n<4;n++) f.tick(250);
+  assert.equal(f.grbl.jogPhase,'idle');
+  assert.equal(f.queries(),6,'Fresh motion starts a new bounded burst');
+});
+
+test('motion subscription observes mutations before notification and unsubscribe ends delivery',()=>{
+  const f=fixture(); f.join(); f.socket.receive('workflow:state','idle');
+  f.socket.receive('serialport:read','Grbl 1.1h');
+  const observed=[];
+  let receipt;
+  const unsubscribe=f.session.subscribeMotion(progress=>observed.push({
+    progress, state:f.session.activeState, workflow:f.session.workflowState,
+    sequence:f.session.reportSequence, position:f.session.positionReport?.values[0],
+    receipt:receipt?.state,
+    epoch:f.session.motionEpoch,
+  }));
+  f.socket.receive('controller:state','Grbl',{status:{activeState:'Jog',mpos:{x:'0.500',y:'0.000',z:'0.000'}}});
+  assert.equal(observed.at(-1).position,0.5);
+  assert.equal(observed.at(-1).progress,true);
+  report(f,'Idle');
+  assert.equal(observed.at(-1).sequence,1);
+  assert.equal(observed.at(-1).state,'Idle');
+  receipt=f.session.jog('$J=G21 G91 X0.001 F250');
+  const [,code,context]=stopCommands(f).findLast(([name])=>name==='gcode');
+  f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
+  assert.equal(observed.at(-1).receipt,'written');
+  f.socket.receive('serialport:read','ok');
+  assert.equal(receipt.state,'acknowledged');
+  assert.equal(observed.at(-1).receipt,'acknowledged');
+  f.socket.receive('workflow:state','running');
+  assert.equal(observed.at(-1).workflow,'running');
+  const epoch=f.session.motionEpoch;
+  f.socket.receive('serialport:read','Grbl 1.1h');
+  assert.equal(observed.at(-1).epoch,epoch+1);
+  unsubscribe(); unsubscribe();
+  const count=observed.length;
+  f.socket.receive('serialport:read','<Idle|MPos:1,0,0>');
+  f.session.disconnect();
+  assert.equal(observed.length,count);
+});
+
+test('a long dwell before ACK preserves every merged detent without status queries or a deadline',()=>{
+  const f=gatedJogFixture('delayed');
+  f.socket.receive('serialport:write','G4 P10\n',{source:'feeder'});
+  f.grbl.jog('X',1,250);
+  const gcode=()=>stopCommands(f).filter(([name])=>name==='gcode');
+  const write=([,code,context])=>f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
+  write(gcode()[0]);
+  assert.equal(f.grbl.jog('X',2,250),'buffered');
+  f.advance(5000);
+  assert.equal(f.grbl.jogPhase,'active');
+  assert.equal(f.grbl.jogBacklog.distance,2);
+  assert.equal(f.queries(),0);
+  assert.equal(gcode().length,1);
+  f.socket.receive('serialport:read','ok'); // Dwell, not the jog.
+  f.advance(5000);
+  assert.equal(f.grbl.jogBacklog.distance,2);
+  assert.equal(f.queries(),0);
+  assert.equal(gcode().length,1);
+  f.socket.receive('serialport:read','ok');
+  f.tick(50);
+  assert.equal(gcode().length,2);
+  assert.equal(gcode()[1][1],'$J=G21 G91 X2.0000 F250.000');
+  assert.equal(f.grbl.jogTarget.value,3);
+  write(gcode()[1]);
+  f.advance(5000);
+  assert.equal(f.grbl.jogCompleted(),false);
+  assert.equal(f.queries(),0);
+  f.socket.receive('serialport:read','ok');
+  f.machine.state='Jog'; f.machine.x=3; f.broadcast();
+  f.machine.state='Idle'; f.broadcast();
+  assert.equal(f.grbl.jogPhase,'idle');
+  assert.equal(f.jobs.size,0);
+  assert.equal(f.motionListeners.size,0);
+});
+
+test('zero-sum backlog after its trusted ACK re-evaluates unchanged Idle with a fresh delay',()=>{
+  const f=gatedJogFixture('delayed'); f.session.settings.settings.$100='200';
+  f.grbl.jog('X',0.001,250);
+  const [,code,context]=stopCommands(f).findLast(([name])=>name==='gcode');
+  f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
+  f.grbl.jog('X',0.04,250); f.grbl.jog('X',-0.04,250);
+  f.advance(4000);
+  assert.equal(f.grbl.jogBacklog.distance,0);
+  assert.equal(f.queries(),0);
+  f.socket.receive('serialport:read','ok');
+  f.tick(50);
+  assert.equal(f.grbl.jogBacklog,null);
+  assert.equal(stopCommands(f).filter(([name])=>name==='gcode').length,1);
+  assert.equal(f.queries(),0);
+  f.tick(750); assert.equal(f.grbl.jogPhase,'active');
+  f.tick(250);
+  assert.equal(f.grbl.jogPhase,'idle');
+  assert.equal(f.jobs.size,0);
+  assert.equal(f.motionListeners.size,0);
+});
+
+for(const kind of ['MPos','WPos']) test(`a native dual-frame echo of raw ${kind} preserves sample freshness`,()=>{
+  const f=gatedJogFixture();
+  const native=x=>f.socket.receive('controller:state','Grbl',{status:{activeState:'Idle',
+    mpos:{x:(x+(kind==='WPos'?10:0)).toFixed(3),y:'0.000',z:'0.000'},
+    wpos:{x:(x-(kind==='MPos'?10:0)).toFixed(3),y:'0.000',z:'0.000'}}});
+  native(0);
+  f.socket.receive('serialport:read',`<Idle|${kind}:0.250,0.000,0.000|FS:0,0>`);
+  const positionSequence=f.session.positionSequence, reportSequence=f.session.reportSequence;
+  const rawSequence=f.session.positionReport.sequence;
+  native(0.25);
+  assert.equal(f.session.positionSequence,positionSequence);
+  assert.equal(f.session.reportSequence,reportSequence);
+  assert.equal(f.session.positionReports.MPos.sequence,rawSequence);
+  assert.equal(f.session.positionReports.WPos.sequence,rawSequence);
+});
+
+test('a raw-first native echo cannot restart the Idle grace period',()=>{
+  const f=gatedJogFixture(); f.rawResponses(false);
+  f.grbl.jog('X',1,250);
+  f.advance(250);
+  f.socket.receive('serialport:read','<Idle|MPos:0.250,0.000,0.000|FS:0,0>');
+  f.machine.x=0.25; f.broadcast();
+  assert.equal(f.queries(),0);
+  f.tick(500);
+  assert.equal(f.queries(),1,'The original 750 ms ambiguity deadline remains in force');
+  f.grbl.clearJog();
+});
+
+test('a clipped raw reply echoed natively cannot renew a failed five-query burst',()=>{
+  const f=gatedJogFixture(); f.grbl.jog('X',1,250);
+  f.machine.x=0.25;
+  f.tick(750);
+  assert.equal(f.queries(),1);
+  const positionSequence=f.session.positionSequence, reportSequence=f.session.reportSequence;
+  f.rawResponses(false);
+  f.advance(100);
+  f.broadcast();
+  assert.equal(f.session.positionSequence,positionSequence);
+  assert.equal(f.session.reportSequence,reportSequence);
+  f.tick(150);
+  assert.equal(f.queries(),2,'The native echo cannot restart the 750 ms grace period');
+  for(let n=0;n<3;n++) f.tick(250);
+  f.advance(5000);
+  assert.equal(f.queries(),5,'A raw echo cannot reset the confirmation request budget');
+  assert.equal(f.grbl.jogPhase,'armed');
+  assert.equal(f.jobs.size,0);
+  assert.equal(f.motionListeners.size,0);
+  assert.equal(f.grbl.jogCompleted(),false);
+  f.grbl.clearJog();
+});
+
+for(const [event,interrupt] of [
+  ['reset',f=>f.socket.receive('serialport:read','Grbl 1.1h')],
+  ['disconnect',f=>f.session.disconnect()],
+  ['program',f=>f.socket.receive('workflow:state','running')],
+]) test(`an inline ${event} during jog emission cannot adopt the changed motion session`,()=>{
+  const f=gatedJogFixture('delayed');
+  const send=f.session.jog.bind(f.session);
+  f.session.jog=code=>{
+    const receipt=send(code);
+    interrupt(f);
+    return receipt;
+  };
+  assert.equal(f.grbl.jog('X',1,250),'dropped');
+  assert.equal(f.grbl.jogPhase,'idle');
+  assert.equal(f.grbl.jogTarget,null);
+  assert.equal(f.grbl.jogReceipt,null);
+  assert.equal(f.jobs.size,0);
+  assert.equal(f.motionListeners.size,0);
+  const commands=stopCommands(f).length;
+  f.advance(5000);
+  assert.equal(stopCommands(f).length,commands);
+});
+
+test('motion notification does not revisit observers added during the same delivery',()=>{
+  const f=fixture(); f.join();
+  const calls=[];
+  let unsubscribeFirst, unsubscribeSecond;
+  unsubscribeFirst=f.session.subscribeMotion(()=>{
+    calls.push('first');
+    unsubscribeFirst();
+    unsubscribeSecond=f.session.subscribeMotion(()=>calls.push('second'));
+  });
+  report(f,'Idle');
+  assert.deepEqual(calls,['first']);
+  report(f,'Idle');
+  assert.deepEqual(calls,['first','second']);
+  unsubscribeSecond();
+});
+
+test('an inline rejected jog ACK starts ordinary cancellation with exactly one observer',()=>{
+  const f=gatedJogFixture('delayed');
+  const send=f.session.jog.bind(f.session);
+  f.session.jog=code=>{
+    const receipt=send(code);
+    const [,written,context]=stopCommands(f).findLast(([name])=>name==='gcode');
+    f.socket.receive('serialport:write',`${written}\n`,{...context,source:'feeder'});
+    f.socket.receive('serialport:read','error:15 (Travel exceeded)');
+    return receipt;
+  };
+  f.grbl.jog('X',1,250);
+  assert.equal(f.grbl.jogPhase,'canceling');
+  assert.equal(f.motionListeners.size,1);
+  assert.equal(f.session.motionListeners.size,1);
+  assert.equal(f.jobs.size,1);
+  assert.equal(f.queries(),0);
+  assert.equal(stopCommands(f).filter(([name])=>name==='jogCancel').length,1);
+  assert.equal(stopCommands(f).filter(([name])=>name==='feeder:stop').length,0);
+  assert.equal(f.logs.filter(line=>/error:15.*canceling queued jogs/.test(line)).length,1);
+  f.tick(750);
+  assert.equal(f.grbl.jogPhase,'canceling');
+  assert.equal(f.motionListeners.size,1);
+  f.tick(250);
+  assert.equal(f.grbl.jogPhase,'idle');
+  assert.equal(f.motionListeners.size,0);
+  assert.equal(f.session.motionListeners.size,0);
+  assert.equal(f.jobs.size,0);
 });

@@ -11,8 +11,9 @@ function clock() {
     advance(ms) { time += ms; for (const [fn, due] of [...timers]) { if (due <= time) { timers.delete(fn); fn(); } } }, timers };
 }
 function fixture() {
-  const commands = [], logs = [], timer = clock();
+  const commands = [], logs = [], timer = clock(), listeners = new Set();
   const session = { status: { phase: 'joined' }, stopPhase: 'idle', workflowState: 'idle', activeState: 'Idle', generation: 1,
+    subscribeMotion(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     positionReport: { kind: 'MPos', values: [0,0,0], sequence: 1, units: '0', resolution: 0.001 },
     reportSequence: 1, idleReports: 2, overrideSequence: 1, overrides: [100, 100, 100],
     state: { parserstate: { spindle: '500', modal: { spindle: 'M5', coolant: 'M9' } } },
@@ -21,7 +22,7 @@ function fixture() {
   Object.defineProperty(session, 'positionReports', { get: () => ({ [session.positionReport.kind]: session.positionReport }) });
   session.jog = code => {
     session.command('gcode', code);
-    return { state: 'acknowledged', reportSequence: session.reportSequence };
+    return { state: 'acknowledged', transmission: 'written', reportSequence: session.reportSequence };
   };
   const grbl = new Grbl(session, () => 20, message => logs.push(message), timer);
   const controls = new PendantControls(grbl, { ...timer, log: message => logs.push(message) });
@@ -29,7 +30,8 @@ function fixture() {
   const input = report => { current = { ...current, firstKeyCode: 0, secondKeyCode: 0, jog: 0, ...report }; controls.handleInput(current); };
   const press = (code, modifier = 0) => { input({ firstKeyCode: modifier || code, secondKeyCode: modifier ? code : 0 }); input({}); };
   const ack = (feed, spindle) => { session.overrides = [feed, 100, spindle]; session.overrideSequence++; timer.advance(250); };
-  return { session, grbl, controls, commands, logs, timer, input, press, ack };
+  return { session, grbl, controls, commands, logs, timer, input, press, ack,
+    notify: (progress = false) => { for (const listener of [...listeners]) listener(progress); } };
 }
 
 test('startup Step is idle until input and the first detent jogs the selected distance', () => {
@@ -133,7 +135,8 @@ test('Continuous uses axis max-rate percentage, bounds pulses, cancels after sil
   f.timer.advance(100); f.input({ jog: 5 });
   assert.equal(f.commands.filter(([c]) => c === 'gcode').length, 1);
   f.timer.advance(180);
-  assert.deepEqual(f.commands.slice(-3).map(([c]) => c), ['feeder:stop', 'jogCancel', 'statusreport']);
+  assert.equal(f.commands.at(-1)[0],'jogCancel');
+  assert.equal(f.commands.some(([c])=>c==='statusreport'),false,'Cancellation confirmation is delayed');
   f.input({ jog: 1 }); assert.equal(f.commands.filter(([c]) => c === 'gcode').length, 1);
   f.session.reportSequence+=2; f.input({ jog: 1 });
   assert.equal(f.commands.filter(([c]) => c === 'gcode').length, 2);
@@ -227,15 +230,15 @@ test('Continuous never queues behind a slow segment and never starts motion from
   const f=fixture(); f.press(0x0e); f.input({jog:1}); f.session.activeState='Jog';
   for(let i=0;i<20;i++) { f.timer.advance(50); f.input({jog:5}); }
   assert.equal(f.commands.filter(([c])=>c==='gcode').length,1);
-  assert.ok(f.commands.filter(([c])=>c==='statusreport').length>=5);
+  assert.equal(f.commands.filter(([c])=>c==='statusreport').length,0,'Native motion never needs a pendant poll');
   f.session.activeState='Idle'; f.session.idleReports=2; f.session.reportSequence+=2; f.session.positionReport={...f.session.positionReport,values:[1,0,0],sequence:f.session.reportSequence};
   f.timer.advance(100);
   assert.equal(f.commands.filter(([c])=>c==='gcode').length,1);
   f.input({jog:1});
   assert.equal(f.commands.filter(([c])=>c==='gcode').length,2);
   f.timer.advance(180);
-  f.session.reportSequence+=2; f.session.idleReports=2;
-  f.timer.advance(100); assert.equal(f.timer.timers.size,0);
+  f.session.reportSequence+=2; f.session.idleReports=2; f.notify();
+  assert.equal(f.timer.timers.size,0);
 });
 
 test('invalid probe thickness refuses motion while an explicit zero remains valid', () => {
@@ -256,27 +259,25 @@ test('two in-flight Idle reports at the old position cannot admit another Contin
   f.input({jog:1}); assert.equal(f.commands.filter(([c])=>c==='gcode').length,2);
 });
 
-test('a jog the controller clips at a soft limit stops polling once Idle settles and admits the next jog', () => {
-  // FluidNC clips jogs to the soft-limit range: at the limit it acknowledges
-  // the jog with ok, never leaves Idle, and the position never changes.
-  for (const [replyTracking, receiptState, notice] of [
-    ['synchronized', 'acknowledged', /Z jog ended short of its target/],
-    ['unknown', 'uncertain', /Jog completion cannot be confirmed/],
+test('clipped and uncertain jogs use distinct raw Idle evidence thresholds', () => {
+  for (const [replyTracking, receiptState, count, phase, notice] of [
+    ['synchronized', 'acknowledged', 5, 'idle', /Z jog ended short of its target/],
+    ['unknown', 'uncertain', 2, 'armed', /Jog completion cannot be confirmed/],
   ]) {
     const f=fixture(); f.session.replyTracking=replyTracking; f.session.positionReport={...f.session.positionReport,values:[0,0,-356]};
     f.session.jog=code=>{ f.session.command('gcode',code); return {state:receiptState,transmission:'written',reportSequence:f.session.reportSequence}; };
     assert.equal(f.grbl.jog('Z',-1,100),'sent');
-    const report=()=>{ f.session.reportSequence++; f.session.idleReports++; f.session.positionReport={...f.session.positionReport,sequence:f.session.reportSequence}; f.timer.advance(100); };
-    const polls=()=>f.commands.filter(([c])=>c==='statusreport').length;
-    for(let i=0;i<4;i++) report();
-    assert.equal(f.timer.timers.size,1,replyTracking);
-    report();
+    for(let i=0;i<count;i++) {
+      f.session.reportSequence++; f.session.idleReports++;
+      f.session.positionReport={...f.session.positionReport,sequence:f.session.reportSequence};
+      f.notify();
+      assert.equal(f.grbl.jogPhase,i===count-1?phase:'active',replyTracking);
+    }
     assert.equal(f.timer.timers.size,0,replyTracking);
-    const settled=polls(); f.timer.advance(1000);
-    assert.equal(polls(),settled,replyTracking);
     assert.match(f.logs.at(-1),notice);
     assert.equal(f.grbl.jog('Z',1,100),'sent',replyTracking);
     assert.equal(f.commands.filter(([c])=>c==='gcode').length,2,replyTracking);
+    f.grbl.clearJog();
   }
 });
 

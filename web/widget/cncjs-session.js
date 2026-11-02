@@ -27,6 +27,7 @@ export class CncjsSession {
     Object.assign(this, { io, origin, onStatus, onState, onConfig, schedule, cancel });
     this.socket = null;
     this.timer = null;
+    this.motionListeners = new Set();
     this.stopTimer = null;
     this.stopPhase = 'idle';
     this.stopIntent = 'motion';
@@ -41,6 +42,7 @@ export class CncjsSession {
     this.overrideSequence = 0;
     this.overrides = [];
     this.positionReport = null;
+    this.rawPositionReport = null;
     this.positionReports = {};
     this.positionSequence = 0;
     this.statePositionSignatures = {};
@@ -61,6 +63,17 @@ export class CncjsSession {
     this.selectedPort = null;
     this.generation = 0;
     this.status = { phase: 'disconnected', port: null, controller: null, detail: '' };
+  }
+
+  subscribeMotion(listener) {
+    this.motionListeners.add(listener);
+    return () => this.motionListeners.delete(listener);
+  }
+
+  notifyMotion(nativeProgress = false) {
+    for (const listener of [...this.motionListeners]) {
+      if (this.motionListeners.has(listener)) listener(nativeProgress);
+    }
   }
 
   update(phase, detail = '') {
@@ -85,6 +98,7 @@ export class CncjsSession {
     this.activeState = '';
     this.overrides = [];
     this.positionReport = null;
+    this.rawPositionReport = null;
     this.positionReports = {};
     this.statePositionSignatures = {};
     this.motionState = '';
@@ -94,6 +108,7 @@ export class CncjsSession {
     this.pendingPort = null;
     this.status.port = null;
     this.status.controller = null;
+    this.notifyMotion();
   }
 
   discover() {
@@ -151,18 +166,34 @@ export class CncjsSession {
     });
     on('controller:state', (type, state) => {
       if (type !== 'Grbl') return;
+      const previousState = this.state?.status?.activeState;
       this.state = state;
       const status = state?.status || {};
+      const sequence = this.positionSequence;
+      const raw = this.rawPositionReport;
+      const rawFrame = status[raw?.kind === 'MPos' ? 'mpos' : 'wpos'];
+      const echo = raw && raw.activeState === status.activeState && raw.units === this.settings.settings?.$13
+        && ['x', 'y', 'z'].every((axis, index) => rawFrame?.[axis] !== undefined && Number(rawFrame[axis]) === raw.values[index]);
+      let changed = false;
       for (const [kind, position] of [['MPos', status.mpos], ['WPos', status.wpos]]) {
         const words = ['x', 'y', 'z'].map(axis => position?.[axis]);
         const signature = JSON.stringify([status.activeState, ...words]);
         if (signature === this.statePositionSignatures[kind] || words.some(value => value === undefined)) continue;
         this.statePositionSignatures[kind] = signature;
-        this.recordPosition(kind, words.map(String), status.activeState);
+        changed = true;
+        // CNCjs can publish both frames from one raw sample. Preserve that
+        // sample's sequence rather than inventing fresh progress for its echo.
+        this.recordPosition(kind, words.map(String), status.activeState, echo ? raw.sequence : undefined);
       }
+      const progress = !echo && (sequence !== this.positionSequence || previousState !== status.activeState);
+      if (changed) this.rawPositionReport = null;
+      // A parser-only rebroadcast must not replace fresher raw motion feedback.
+      if (progress && status.activeState) this.motionState = status.activeState;
+      if (progress && this.motionState !== 'Idle') this.idleReports = 0;
       if (Array.isArray(state?.status?.ov) && state.status.ov.length === 3) this.overrides = state.status.ov.map(Number);
       this.requestSettings();
       this.onState(type, state);
+      this.notifyMotion(progress);
     });
     on('controller:settings', (type, settings) => {
       if (type !== 'Grbl') return;
@@ -184,8 +215,12 @@ export class CncjsSession {
         this.replyTracking = 'unknown';
       }
       this.requestSettings();
+      this.notifyMotion();
     });
-    on('serialport:write', (data, context = {}) => this.recordWrite(data, context));
+    on('serialport:write', (data, context = {}) => {
+      this.recordWrite(data, context);
+      this.notifyMotion();
+    });
     on('serialport:read', line => {
       this.recordReply(line);
       if (typeof line === 'string' && /^error:\d+(?:\s|$)/.test(line)) {
@@ -203,6 +238,7 @@ export class CncjsSession {
         this.motionState = '';
         this.activeState = '';
         this.positionReport = null;
+        this.rawPositionReport = null;
         this.positionReports = {};
         this.overrides = [];
         this.statePositionSignatures = {};
@@ -219,24 +255,26 @@ export class CncjsSession {
       const position = typeof line === 'string' ? /\|(MPos|WPos):([^|>]+)/.exec(line) : null;
       if (position) {
         const words = position[2].split(',').slice(0, 3);
-        this.recordPosition(position[1], words, state);
+        this.rawPositionReport = this.recordPosition(position[1], words, state);
       }
       const overrides = typeof line === 'string' ? /\|Ov:(\d+),(\d+),(\d+)/.exec(line) : null;
       if (overrides) { this.overrides = overrides.slice(1).map(Number); this.overrideSequence += 1; }
       this.stopReport(line);
+      this.notifyMotion();
     });
     on('serialport:list', (ports) => this.join(ports));
     this.timer = this.schedule(() => this.discover(), 2000);
   }
 
-  recordPosition(kind, words, activeState) {
+  recordPosition(kind, words, activeState, sequence) {
     const values = words.map(Number);
     if (!activeState || words.length !== 3 || !values.every(Number.isFinite)) return;
     this.motionState = activeState;
-    this.positionReport = { kind, values, sequence: ++this.positionSequence,
+    this.positionReport = { kind, values, activeState, sequence: sequence ?? ++this.positionSequence,
       units: this.settings.settings?.$13,
       resolution: Math.max(...words.map(word => 10 ** -(word.split('.')[1]?.length || 0))) };
     this.positionReports[kind] = this.positionReport;
+    return this.positionReport;
   }
 
   join(ports) {
@@ -409,6 +447,7 @@ export class CncjsSession {
     // CNCjs's forced stop uses a cached state and a fixed 500 ms reset delay.
     // Explicit reports retain GRBL's Hold substate; never reset during Hold:1.
     this.startStopPolling();
+    this.notifyMotion();
   }
 
   startStopPolling() {

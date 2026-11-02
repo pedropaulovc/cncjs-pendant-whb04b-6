@@ -3,6 +3,11 @@
 // finished it short of its target. Two reports can still be in flight from
 // before the jog started, so stopping short needs more evidence than that.
 const SETTLED_IDLE_REPORTS = 5;
+// Native CNCjs status runs at 250 ms. Give unchanged Idle several native cycles
+// before requesting evidence that CNCjs deduplicates. Never poll a moving jog.
+const CONFIRM_DELAY = 750;
+const CONFIRM_INTERVAL = 250;
+const FEEDBACK_TIMEOUT = 3000;
 
 export class Grbl {
   constructor(session, getProbeThickness = () => 20, log = () => {}, { schedule = (fn, ms) => setTimeout(fn, ms), cancel = id => clearTimeout(id), now = () => performance.now() } = {}) {
@@ -17,6 +22,11 @@ export class Grbl {
     this.jogSequence = 0;
     this.jogPositionSequence = 0;
     this.jogTimer = null;
+    this.jogUnsubscribe = null;
+    this.confirmRequests = 0;
+    this.confirmBlocked = false;
+    this.observedReceiptState = null;
+    this.observedMotionState = '';
     this.jogTarget = null;
     this.jogCompletionNotice = 'none';
     this.jogShortNotice = 'none';
@@ -174,6 +184,7 @@ export class Grbl {
       && Math.abs(position.value - this.jogTarget.value) <= 2 * tolerance) return this.unmeasuredJogCompleted(acknowledgedIdle);
     const fresh = position.sequence > this.jogPositionSequence && Math.abs(position.value - this.jogTarget.start) >= tolerance;
     if (fresh && Math.abs(position.value - this.jogTarget.value) <= tolerance) return true;
+    if (this.session.replyTracking === 'unknown') return this.unmeasuredJogCompleted(false);
     return this.jogStoppedShort(position);
   }
   // FluidNC clips jogs to the soft-limit range and acknowledges them with ok,
@@ -184,7 +195,7 @@ export class Grbl {
     const acknowledged = this.jogReceipt?.state === 'acknowledged'
       && this.session.reportSequence >= this.jogReceipt.reportSequence + SETTLED_IDLE_REPORTS;
     // Without trusted acknowledgements the jog may still wait behind a dwell:
-    // stop polling but keep cancellation armed, as for unmeasured jogs.
+    // retain cancellation ownership rather than manufacture completion.
     if (!acknowledged) return this.unmeasuredJogCompleted(false);
     if (this.jogShortNotice === 'none') {
       this.jogShortNotice = 'shown';
@@ -198,19 +209,27 @@ export class Grbl {
       this.jogPhase = 'armed';
       if (this.jogCompletionNotice === 'none') {
         this.jogCompletionNotice = 'shown';
-        this.log('Jog completion cannot be confirmed after joining an active controller or program activity. Polling paused; jog cancellation remains armed. Change mode/axis or press Stop to cancel. Reset restores acknowledgement tracking.');
+        this.log('Jog completion cannot be confirmed after joining an active controller or program activity. Confirmation paused; jog cancellation remains armed. Change mode/axis or press Stop to cancel. Reset restores acknowledgement tracking.');
       }
     }
     return acknowledgedIdle;
   }
   clearJog() {
-    if (this.jogTimer !== null) this.cancel(this.jogTimer);
-    this.jogTimer = null;
+    this.stopJogObservation();
     this.dropBacklog();
     this.jogPhase = 'idle';
     this.jogTarget = null;
     this.jogReceipt = null;
     this.jogCompletionNotice = 'none';
+  }
+  cancelJogTimer() {
+    if (this.jogTimer !== null) this.cancel(this.jogTimer);
+    this.jogTimer = null;
+  }
+  stopJogObservation() {
+    this.cancelJogTimer();
+    this.jogUnsubscribe?.();
+    this.jogUnsubscribe = null;
   }
   dropBacklog() {
     if (this.backlogTimer !== null) this.cancel(this.backlogTimer);
@@ -253,7 +272,7 @@ export class Grbl {
       return 'dropped';
     }
     // Detents that returned to their start cancel out; nothing to send.
-    if (Math.abs(backlog.distance) < 0.00005) return 'buffered';
+    if (Math.abs(backlog.distance) < 0.00005) { this.cancelJogTimer(); this.refreshJog(); return 'buffered'; }
     const result = this.jog(backlog.axis, backlog.distance, backlog.feed);
     if (result === 'dropped') this.log(`Step: discarded ${backlog.distance.toFixed(4)} mm of merged ${backlog.axis} wheel input.`);
     return result;
@@ -276,32 +295,81 @@ export class Grbl {
     this.cancelJog('controller-error');
     return 'recovering';
   }
-  pollJog() {
-    if (this.jogTimer !== null) return;
-    this.jogTimer = this.schedule(() => {
+  observeJog() {
+    if (!this.jogUnsubscribe) this.jogUnsubscribe = this.session.subscribeMotion(progress => this.refreshJog(progress));
+    this.refreshJog();
+  }
+  refreshJog(nativeProgress = false) {
+    if (this.jogSessionChanged() || this.session.status?.phase !== 'joined' || this.session.stopPhase !== 'idle' || this.session.workflowState !== 'idle' || ['Alarm', 'Sleep', 'Check'].includes(this.activeState)) { this.clearJog(); return; }
+    if (this.recoverJogError() === 'recovering') return;
+    if (this.jogPhase === 'idle' || (this.jogPhase === 'active' && this.jogCompleted()) || (this.jogPhase === 'canceling' && this.cancellationCompleted())) { this.clearJog(); return; }
+    if (this.jogPhase === 'armed') { this.stopJogObservation(); return; }
+    const receiptChanged = this.observedReceiptState !== this.jogReceipt?.state;
+    this.observedReceiptState = this.jogReceipt?.state;
+    const motionChanged = this.observedMotionState !== this.activeState;
+    this.observedMotionState = this.activeState;
+    if (nativeProgress || receiptChanged || motionChanged) {
+      this.cancelJogTimer();
+      this.confirmRequests = 0;
+      this.confirmBlocked = false;
+    }
+    if (this.confirmBlocked || this.jogTimer !== null) return;
+    // An ACK is not completion, but a trusted outstanding line can still be
+    // behind a dwell. Do not query cached Idle to try to prove it has executed.
+    const awaitingReply = this.jogPhase === 'active' && this.jogAwaitingReply() && this.session.replyTracking !== 'unknown';
+    if (awaitingReply || this.jogBacklog) return;
+    const canConfirm = this.activeState === 'Idle';
+    this.scheduleJog(canConfirm ? () => this.confirmJog() : () => this.pauseJogConfirmation(),
+      canConfirm ? CONFIRM_DELAY : FEEDBACK_TIMEOUT);
+  }
+  scheduleJog(callback, delay) {
+    const timer = this.schedule(() => {
+      if (this.jogTimer !== timer) return;
       this.jogTimer = null;
-      if (this.jogSessionChanged() || this.session.status?.phase !== 'joined' || this.session.stopPhase !== 'idle' || this.session.workflowState !== 'idle' || ['Alarm', 'Sleep', 'Check'].includes(this.activeState)) { this.clearJog(); return; }
-      if (this.recoverJogError() === 'recovering') return;
-      if (this.jogPhase === 'idle' || (this.jogPhase === 'active' && this.jogCompleted()) || (this.jogPhase === 'canceling' && this.cancellationCompleted())) { this.clearJog(); return; }
-      if (this.jogPhase === 'armed') return;
-      this._cmd('statusreport');
-      this.pollJog();
-    }, 100);
+      callback();
+    }, delay);
+    this.jogTimer = timer;
+  }
+  confirmJog() {
+    // Re-evaluate before each request; a timer is never evidence of completion.
+    this.refreshJog();
+    if (!['active', 'canceling'].includes(this.jogPhase) || this.confirmBlocked || this.activeState !== 'Idle') return;
+    if (this.jogPhase === 'active' && (this.jogBacklog || (this.jogAwaitingReply() && this.session.replyTracking !== 'unknown'))) return;
+    this.cancelJogTimer();
+    if (this.confirmRequests >= SETTLED_IDLE_REPORTS) { this.pauseJogConfirmation(); return; }
+    this.confirmRequests += 1;
+    // Arm before emitting: a synchronous response may complete and cancel it.
+    this.scheduleJog(() => this.confirmJog(), CONFIRM_INTERVAL);
+    this._cmd('statusreport');
+  }
+  pauseJogConfirmation() {
+    this.cancelJogTimer();
+    this.confirmBlocked = true;
+    if (this.jogPhase === 'active') {
+      this.jogPhase = 'armed';
+      this.stopJogObservation();
+    }
+    if (this.jogCompletionNotice === 'none') {
+      this.jogCompletionNotice = 'shown';
+      this.log('Jog completion cannot be confirmed: feedback stopped or the bounded confirmation received insufficient Idle evidence. Jog cancellation remains armed; change mode/axis or press Stop to cancel. Pending cancellation still blocks new jogs.');
+    }
   }
   cancelJog(cause = 'operator') {
     if (cause === 'operator' && this.recoverJogError() === 'recovering') return;
     if (!['active', 'armed'].includes(this.jogPhase)) return;
     this.dropBacklog();
-    this.jogPhase = 'idle';
+    this.stopJogObservation();
     if (this.jogSessionChanged() || this.session.workflowState !== 'idle' || (cause === 'operator' && this.jogCompleted())) { this.clearJog(); return; }
     // Once the last owned line was written, no owned commands remain in the
     // feeder. A later CNCjs macro must not be discarded by passive cancellation.
     if (this.jogReceipt?.transmission !== 'written') this._cmd('feeder:stop');
-    if (this._cmd('jogCancel') === 'dropped') return;
+    if (this._cmd('jogCancel') === 'dropped') { this.jogPhase = 'armed'; return; }
     this.cancelSequence = this.session.reportSequence;
     this.jogPhase = 'canceling';
-    this._cmd('statusreport');
-    this.pollJog();
+    this.confirmRequests = 0;
+    this.confirmBlocked = false;
+    this.observedReceiptState = this.jogReceipt?.state;
+    this.observeJog();
   }
   jogPulse(axis, distance, feed) {
     if (this.jogSessionChanged()) this.clearJog();
@@ -347,20 +415,36 @@ export class Grbl {
     }
     const position = this.position(axis, pending?.kind);
     const previous = pending || position;
+    // Socket fixtures (and local adapters) may deliver a write/ACK inline.
+    // Observe only after installing the new receipt and accumulated target.
+    this.stopJogObservation();
+    const generation = this.session.generation;
+    const epoch = this.session.motionEpoch;
+    const workflowEpoch = this.session.workflowEpoch;
+    const sequence = this.session.reportSequence;
+    const positionSequence = this.session.positionReport?.sequence ?? 0;
+    const errorSequence = this.session.errorSequence ?? 0;
     const receipt = this.session.jog(`$J=G21 G91 ${axis}${distance.toFixed(4)} F${Math.min(feed, max).toFixed(3)}`);
-    if (receipt.state === 'dropped') return 'dropped';
+    if (receipt.state === 'dropped') { if (this.jogPhase === 'active') this.observeJog(); return 'dropped'; }
+    if (generation !== this.session.generation || epoch !== this.session.motionEpoch || workflowEpoch !== this.session.workflowEpoch) {
+      this.clearJog();
+      return this.refuse('Jog interrupted while sending: controller session changed.');
+    }
     this.jogReceipt = receipt;
     this.jogPhase = 'active';
     this.jogAxis = axis;
     this.jogShortNotice = 'none';
-    this.jogGeneration = this.session.generation;
-    this.jogEpoch = this.session.motionEpoch;
-    this.jogWorkflowEpoch = this.session.workflowEpoch;
-    this.jogErrorSequence = this.session.errorSequence ?? 0;
-    this.jogSequence = this.session.reportSequence;
-    this.jogPositionSequence = this.session.positionReport?.sequence ?? 0;
+    this.jogGeneration = generation;
+    this.jogEpoch = epoch;
+    this.jogWorkflowEpoch = workflowEpoch;
+    this.jogErrorSequence = errorSequence;
+    this.jogSequence = sequence;
+    this.jogPositionSequence = positionSequence;
     this.jogTarget = previous ? { ...previous, axis, start: position?.value ?? previous.start, value: previous.value + Number(distance.toFixed(4)) } : null;
-    this.pollJog();
+    this.confirmRequests = 0;
+    this.confirmBlocked = false;
+    this.observedReceiptState = receipt.state;
+    this.observeJog();
     return 'sent';
   }
 }

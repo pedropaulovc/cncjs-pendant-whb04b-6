@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [3.2.4] - 2026-11-02
+
+### Fixed
+
+- Step and Continuous jog completion now follows fresh native CNCjs motion updates rather than polling every 100 ms. A changed endpoint completes immediately without an extra `statusreport`, and normal motion adds no status requests. Ambiguous Idle evidence waits 750 ms before a burst of at most five requests spaced 250 ms apart: two post-acknowledgement Idle reports confirm tiny or out-and-back moves, while clipped or zero-clipped moves require five. An unknown outcome after two Idle reports remains armed. Fresh motion resets the burst; cached or parser-only state is not fresh evidence.
+- A trusted pending acknowledgement has no deadline or status queries: it can wait behind a long dwell while merged detents and the 50 ms backlog timer are preserved. After acknowledgement, three seconds of native moving-state feedback silence leaves cancellation armed rather than declaring completion. Cancellation requires two distinct raw Idle reports; its delayed, bounded burst failing leaves it blocked without further automatic queries unless fresh progress arrives. Stop and override behavior is unchanged.
+
 ## [3.2.3] - 2026-11-02
 
 ### Fixed
