@@ -70,6 +70,15 @@ The widget reads the CNCjs token and active serial port from the parent frame,
 maps the pendant's keys, dials, and jog wheel to grbl commands, and mirrors the
 machine coordinates to the pendant LCD.
 
+The compact operating view uses CNCjs-like light controls, with connection status
+and one readout for mode, selected axis, rate/step selector, and wheel delta.
+**Pendant settings** holds probe plate thickness, spindle increment, and large steps.
+**Macro buttons** is a separate top-level panel. **Diagnostics** holds raw keys
+and a scroll-bounded log; all three panels start collapsed. The latest log message also appears in the live
+status line, so connection, jogging, and LCD errors are visible without opening
+Diagnostics. **Re-read creds & connect** retries the CNCjs session using the
+parent frame's credentials. The layout wraps to fit narrow widget columns.
+
 The LCD shows work coordinates (`X1/Y1/Z1`) by default; Macro-10 switches to
 machine coordinates (`X/Y/Z`). Numeric values follow the controller's active
 G20 (inches) or G21 (millimetres) mode, converting GRBL's `$13` report units as
@@ -90,8 +99,8 @@ and discards pendant commands while disconnected instead of queuing them.
 Jog distances and feed rates are always millimetres. Safe-Z moves to machine
 Z = -5 mm; W-Home uses that move before travelling to G54 X0 Y0. Verify that
 height against your machine and workholding before using either key. Probe-Z
-travels up to 50 mm downward at 120 mm/min and uses the widget's plate thickness
-field (20 mm by default). These macros select G21 and leave the controller in mm.
+travels up to 50 mm downward at 120 mm/min and uses **Pendant settings → Probe
+plate mm** (20 mm by default). These macros select G21 and leave the controller in mm.
 
 ## Use the standalone tester
 
@@ -109,7 +118,7 @@ the live key/dial/jog readout and push coordinates to the LCD.
 The mappings follow [LinuxCNC's xhc-whb04b-6 driver](https://www.linuxcnc.org/docs/master/html/en/man/man1/xhc-whb04b-6.1.html)
 with its feed and spindle wheel overrides enabled (`-f -s`). The widget starts
 in **Step** mode, so the wheel jogs by distance. Press **Continuous** to jog
-while turning the wheel. The current mode appears above the input readout.
+while turning the wheel. The current mode appears in the operating readout.
 
 | Control | Action |
 |---------|--------|
@@ -143,16 +152,22 @@ The remaining Fn combinations run operator-configured G-code macros:
 | Reset / Stop / Start-Pause | 11 / 12 / 13 |
 | Macro-10 | 14 |
 
-Configure these under **Pendant settings → Macro buttons**. Each labelled Fn
-combination can be disabled, assigned multiline custom G-code, or linked to a saved
-CNCjs macro. Click **Save settings** to apply the assignments in this browser.
-An unconfigured macro
-only logs its slot number. Bare Reset and Stop retain their normal behavior.
+Configure these under **Macro buttons**. Only configured assignments are listed
+initially. Choose an **Unused Fn combination** and click **Add macro button**
+to add one row at a time; combinations already listed cannot be added twice.
+Each row can be disabled, assigned multiline custom G-code, or linked to a saved
+CNCjs macro. **Remove macro** removes that row from the pending assignments.
+Click the shared **Save settings** button to apply both pendant settings and macro
+assignments in this browser; removed, disabled, and empty custom assignments are
+omitted from the saved configuration. This button is available whenever either
+configuration panel is open or there are unsaved changes. Closing panels does not
+discard edits or hide the unsaved status. An unconfigured macro only logs its slot
+number. Bare Reset and Stop retain their normal behavior.
 
 Saved macros come from the same CNCjs Macro widget and remain linked by ID. The
 list refreshes when CNCjs settings change; **Refresh CNCjs macros** reloads it
 manually without discarding unsaved edits. Deleted macros remain visibly
-unavailable until you replace or disable their assignments.
+unavailable until you replace, disable, or remove their assignments.
 
 Each press fetches the current definition and sends that checked snapshot through
 CNCjs's G-code feeder. Controller variables such as `posx` and `modal.units`, and
@@ -238,10 +253,12 @@ confirming report. Their result follows controller feedback, not a local counter
 
 ### Settings and GRBL limits
 
-**Pendant settings** provides spindle speed increment and the large-step option.
-Changes are stored in browser localStorage under `whb04b-controls`, separately
-for each browser/profile and CNCjs origin. Jogging waits for valid controller
-axis maximum-rate settings instead of guessing a machine speed.
+**Pendant settings** provides probe plate thickness, spindle speed increment, and
+the large-step option. **Save settings** stores spindle increment, large steps,
+and macro assignments in browser localStorage under `whb04b-controls`, separately
+for each browser/profile and CNCjs origin. Probe plate thickness applies directly
+to probing and resets to 20 mm on reload. Jogging waits for valid controller axis
+maximum-rate settings instead of guessing a machine speed.
 If GRBL reports an error while the pendant owns a jog, the widget logs the error,
 cancels queued jogging, and waits for two Idle reports before accepting another jog.
 

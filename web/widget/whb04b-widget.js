@@ -91,6 +91,7 @@ function listenParentMessages(onChange) {
 //---------------------------------------------------------------------------
 const $ = (id) => document.getElementById(id);
 function log(m) {
+  $('operationStatus').textContent = m;
   const el = $('log');
   el.textContent += `[${new Date().toLocaleTimeString()}] ${m}\n`;
   el.scrollTop = el.scrollHeight;
@@ -134,7 +135,7 @@ const controls = new PendantControls(grbl, {
 $('mode').textContent = controls.mode;
 
 function refreshCtxUI() {
-  setPill('tokenPill', !!ctx.token, ctx.token ? 'token ✓' : 'no token');
+  setPill('tokenPill', !!ctx.token, ctx.token ? 'token ready' : 'no token');
   setPill('portPill', !!ctx.port, ctx.port ? `port ${ctx.port}` : 'no port');
 }
 
@@ -190,9 +191,19 @@ function wireUI() {
   try { controls.setConfig(parseConfig(JSON.parse(localStorage.getItem(CONFIG_KEY) || '{}'))); }
   catch (error) { log(`Pendant settings: ${error.message}`); }
   const settingsStatus = $('settingsStatus');
-  const changed = () => { settingsStatus.textContent = 'Unsaved changes.'; };
+  let dirty = false;
+  const updateSettingsActions = () => {
+    $('settingsActions').hidden = !dirty && !$('pendantSettings').open && !$('macroSettings').open;
+  };
+  const changed = () => {
+    dirty = true;
+    settingsStatus.textContent = 'Unsaved changes.';
+    updateSettingsActions();
+  };
+  for (const id of ['pendantSettings', 'macroSettings']) $(id).addEventListener('toggle', updateSettingsActions);
   macroSettings = new MacroSettings({ container: $('macroAssignments'), status: $('macroStatus'),
-    refreshButton: $('refreshMacros'), onRefresh: refreshMacros, onChange: changed });
+    refreshButton: $('refreshMacros'), addSelect: $('macroButtonToAdd'), addButton: $('addMacro'),
+    emptyState: $('macroEmpty'), onRefresh: refreshMacros, onChange: changed });
   macroSettings.setAssignments(controls.config.macros);
   $('spindleIncrement').value = controls.config.spindleIncrement;
   $('largeSteps').value = controls.config.largeSteps;
@@ -202,6 +213,9 @@ function wireUI() {
       const value = parseConfig({ macros: macroSettings.getAssignments(), spindleIncrement: Number($('spindleIncrement').value), largeSteps: $('largeSteps').value });
       localStorage.setItem(CONFIG_KEY, JSON.stringify(value));
       controls.setConfig(value);
+      macroSettings.setAssignments(value.macros);
+      dirty = false;
+      updateSettingsActions();
       settingsStatus.textContent = 'Settings saved for this browser and CNCjs address.';
       log('Pendant settings saved for this browser and CNCjs address.');
     } catch (error) { settingsStatus.textContent = error.message; log(`Pendant settings: ${error.message}`); }
@@ -215,8 +229,8 @@ function boot() {
   listenParentMessages(refreshCtxUI);
   refreshCtxUI();
 
-  pendant.addEventListener('attach', () => { setPill('hidPill', true, 'pendant ✓'); log('Pendant connected.'); onControllerState('Grbl', session.state); });
-  pendant.addEventListener('remove', () => { controls.suspend(); grbl.clearOverrides(); controls.keys.clear(); setPill('hidPill', false, 'pendant ✗'); log('Pendant removed.'); });
+  pendant.addEventListener('attach', () => { setPill('hidPill', true, 'pendant ready'); log('Pendant connected.'); onControllerState('Grbl', session.state); });
+  pendant.addEventListener('remove', () => { controls.suspend(); grbl.clearOverrides(); controls.keys.clear(); setPill('hidPill', false, 'pendant offline'); log('Pendant removed.'); });
   pendant.addEventListener('use', (e) => handleInput(e.detail));
 
   // Re-attach to an already-authorised pendant without a prompt.

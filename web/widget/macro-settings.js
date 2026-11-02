@@ -11,15 +11,24 @@ export const MACRO_BUTTONS = [
 // Edits live in these controls until Save settings is pressed. Refreshing the
 // server catalog replaces choices and previews, never the pending assignments.
 export class MacroSettings {
-  constructor({ container, status, refreshButton, onRefresh = () => {}, onChange = () => {} }) {
-    Object.assign(this, { container, status, refreshButton, onRefresh, onChange });
+  constructor({ container, status, refreshButton, addSelect, addButton, emptyState, onRefresh = () => {}, onChange = () => {} }) {
+    Object.assign(this, { container, status, refreshButton, addSelect, addButton, emptyState, onRefresh, onChange });
     this.document = container.ownerDocument;
     this.catalog = new Map();
     this.macroNames = new Map();
     this.catalogState = 'unloaded';
     this.rows = new Map();
     container.replaceChildren();
-    for (const definition of MACRO_BUTTONS) this.createRow(definition);
+    this.updateAvailableButtons();
+    addButton.addEventListener('click', () => {
+      const definition = MACRO_BUTTONS.find(({ slot }) => slot === addSelect.value);
+      if (!definition || this.rows.has(definition.slot)) return;
+      const row = this.createRow(definition);
+      this.updateOptions(row, 'custom');
+      this.updateAvailableButtons();
+      row.select.focus();
+      this.onChange();
+    });
     refreshButton.addEventListener('click', () => this.onRefresh());
     this.setStatus('unloaded');
   }
@@ -61,19 +70,40 @@ export class MacroSettings {
     note.className = 'macro-note';
     select.setAttribute('aria-describedby', note.id);
     code.setAttribute('aria-describedby', note.id);
-    fieldset.append(legend, choice, code, preview, note);
+    const remove = this.element('button', 'Remove macro');
+    remove.type = 'button';
+    remove.setAttribute('aria-label', `Remove macro for ${name}`);
+    remove.addEventListener('click', () => {
+      this.rows.delete(slot);
+      fieldset.remove();
+      this.updateAvailableButtons();
+      this.addSelect.focus();
+      this.onChange();
+    });
+    fieldset.append(legend, choice, code, preview, note, remove);
     this.container.append(fieldset);
     const row = { select, code, preview, note };
     this.rows.set(slot, row);
     this.updateOptions(row, 'disabled');
     select.addEventListener('change', () => { this.updateRow(row); this.onChange(); });
     code.addEventListener('input', () => { this.updateRow(row); this.onChange(); });
+    return row;
   }
 
   option(value, text) {
     const option = this.element('option', text);
     option.value = value;
     return option;
+  }
+
+  updateAvailableButtons() {
+    const selected = this.addSelect.value;
+    const available = MACRO_BUTTONS.filter(({ slot }) => !this.rows.has(slot));
+    this.addSelect.replaceChildren(...available.map(({ slot, button }) => this.option(slot, `Fn + ${button}`)));
+    if (available.some(({ slot }) => slot === selected)) this.addSelect.value = selected;
+    this.addSelect.disabled = available.length === 0;
+    this.addButton.disabled = available.length === 0;
+    this.emptyState.hidden = this.rows.size !== 0;
   }
 
   updateOptions(row, selection = row.select.value) {
@@ -126,8 +156,12 @@ export class MacroSettings {
   }
 
   setAssignments(assignments) {
-    for (const [slot, row] of this.rows) {
-      const assignment = assignments?.[slot];
+    this.rows.clear();
+    this.container.replaceChildren();
+    for (const definition of MACRO_BUTTONS) {
+      const assignment = assignments?.[definition.slot];
+      if (!(typeof assignment === 'string' && assignment.trim()) && assignment?.source !== 'cncjs') continue;
+      const row = this.createRow(definition);
       if (assignment?.source === 'cncjs' && typeof assignment.name === 'string' && !this.catalog.has(assignment.id)) {
         this.macroNames.set(assignment.id, assignment.name);
       }
@@ -136,6 +170,7 @@ export class MacroSettings {
         : assignment?.source === 'cncjs' ? `cncjs:${assignment.id}` : 'disabled';
       this.updateOptions(row, selection);
     }
+    this.updateAvailableButtons();
   }
 
   getAssignments() {

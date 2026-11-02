@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [3.2.6] - 2026-11-02
+
+### Changed
+
+- Restyled the pendant widget to match CNCjs's compact, light Bootstrap-like controls: a connection bar and single operating readout replace the page heading and large cards.
+- Moved probe thickness into collapsed Pendant settings, and raw keys and the bounded log into collapsed Diagnostics. The latest diagnostic message remains visible in a live status line even when Diagnostics is closed. Existing controls, defaults, and motion behavior are unchanged.
+- Promoted Macro buttons to its own collapsed panel alongside Pendant settings and Diagnostics. The editor lists configured assignments only, adds unused Fn combinations one at a time, and offers per-row removal without changing the supported combinations.
+- Shared Save settings across both configuration panels, preserving unsaved edits and status when panels close. Saving omits removed, disabled, and empty custom mappings while retaining saved CNCjs macro links and catalog refresh behavior.
+
 ## [3.2.5] - 2026-11-02
 
 ### Fixed
