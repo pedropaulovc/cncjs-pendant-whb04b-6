@@ -39,6 +39,7 @@
   .settings-status:empty { margin: 0; }
   .settings-status[data-state="error"] { color: #a94442; }
   .settings-status[data-state="warning"] { color: #8a6d3b; }
+  #macroSettings > :is(.settings-help, .settings-status) { margin: 4px 0; }
   #macroAssignments { display: grid; gap: 6px; margin: 8px 0; }
   .macro-assignment { min-width: 0; margin: 0; padding: 6px; border: 1px solid #ddd; border-radius: 3px; }
   .macro-assignment legend { padding: 0 4px; font-size: 12px; font-weight: 600; }
@@ -87,16 +88,15 @@
     </details>
     <details id="macroSettings">
       <summary>Macro buttons</summary>
-      <p class="settings-help">Add an Fn combination, then choose a saved CNCjs macro or enter custom G-code, one command per line.</p>
-      <p class="settings-help">Saved macros stay linked to the CNCjs Macro widget. Save settings applies all pendant and macro changes together.</p>
-      <button id="refreshMacros" type="button">Refresh CNCjs macros</button>
-      <p id="macroStatus" class="settings-status" role="status" aria-live="polite"></p>
-      <p id="macroEmpty" class="settings-help">No macro buttons assigned. Choose an Fn combination below to add one.</p>
-      <div id="macroAssignments"></div>
+      <p class="settings-help">Add a button, then choose its macro.</p>
       <div class="row macro-add">
         <label class="field" for="macroButtonToAdd">Unused Fn combination<select id="macroButtonToAdd"></select></label>
         <button id="addMacro" type="button">Add macro button</button>
       </div>
+      <p id="macroEmpty" class="settings-help">No assignments yet.</p>
+      <div id="macroAssignments"></div>
+      <button id="refreshMacros" type="button">Refresh CNCjs macros</button>
+      <p id="macroStatus" class="settings-status" role="status" aria-live="polite"></p>
     </details>
     <details>
       <summary>Diagnostics</summary>
