@@ -70,9 +70,9 @@ export class CncjsSession {
     return () => this.motionListeners.delete(listener);
   }
 
-  notifyMotion(nativeProgress = false) {
+  notifyMotion(motionProgress = false) {
     for (const listener of [...this.motionListeners]) {
-      if (this.motionListeners.has(listener)) listener(nativeProgress);
+      if (this.motionListeners.has(listener)) listener(motionProgress);
     }
   }
 
@@ -253,14 +253,23 @@ export class CncjsSession {
         this.idleReports = state === 'Idle' ? this.idleReports + 1 : 0;
       }
       const position = typeof line === 'string' ? /\|(MPos|WPos):([^|>]+)/.exec(line) : null;
+      let movingProgress = false;
       if (position) {
         const words = position[2].split(',').slice(0, 3);
+        const previous = this.positionReports[position[1]];
         this.rawPositionReport = this.recordPosition(position[1], words, state);
+        const current = this.rawPositionReport;
+        // External clients can request raw reports before CNCjs publishes their
+        // native echo. Count changing moving positions once, but never replenish
+        // an Idle confirmation burst with its own replies.
+        movingProgress = ['Jog', 'Run'].includes(state) && current && previous
+          && current.units === previous.units
+          && current.values.some((value, index) => value !== previous.values[index]);
       }
       const overrides = typeof line === 'string' ? /\|Ov:(\d+),(\d+),(\d+)/.exec(line) : null;
       if (overrides) { this.overrides = overrides.slice(1).map(Number); this.overrideSequence += 1; }
       this.stopReport(line);
-      this.notifyMotion();
+      this.notifyMotion(Boolean(movingProgress));
     });
     on('serialport:list', (ports) => this.join(ports));
     this.timer = this.schedule(() => this.discover(), 2000);

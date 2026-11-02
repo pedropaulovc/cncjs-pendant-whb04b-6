@@ -299,7 +299,7 @@ export class Grbl {
     if (!this.jogUnsubscribe) this.jogUnsubscribe = this.session.subscribeMotion(progress => this.refreshJog(progress));
     this.refreshJog();
   }
-  refreshJog(nativeProgress = false) {
+  refreshJog(motionProgress = false) {
     if (this.jogSessionChanged() || this.session.status?.phase !== 'joined' || this.session.stopPhase !== 'idle' || this.session.workflowState !== 'idle' || ['Alarm', 'Sleep', 'Check'].includes(this.activeState)) { this.clearJog(); return; }
     if (this.recoverJogError() === 'recovering') return;
     if (this.jogPhase === 'idle' || (this.jogPhase === 'active' && this.jogCompleted()) || (this.jogPhase === 'canceling' && this.cancellationCompleted())) { this.clearJog(); return; }
@@ -308,7 +308,7 @@ export class Grbl {
     this.observedReceiptState = this.jogReceipt?.state;
     const motionChanged = this.observedMotionState !== this.activeState;
     this.observedMotionState = this.activeState;
-    if (nativeProgress || receiptChanged || motionChanged) {
+    if (motionProgress || receiptChanged || motionChanged) {
       this.cancelJogTimer();
       this.confirmRequests = 0;
       this.confirmBlocked = false;

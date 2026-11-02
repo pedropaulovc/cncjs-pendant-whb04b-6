@@ -1170,6 +1170,45 @@ for(const endpoint of [0,0.25]) test(`clipped jog at ${endpoint} mm requires fiv
   assert.equal(f.motionListeners.size,0);
 });
 
+for(const order of ['raw-first','native-first','raw-only']) test(`changing raw Jog positions keep long motion observed (${order})`,()=>{
+  const f=gatedJogFixture(); f.grbl.jog('X',20,250);
+  for(let sample=1;sample<=20;sample++) {
+    f.advance(250);
+    f.machine.state='Jog'; f.machine.x=sample*0.5;
+    if(order==='native-first') f.broadcast();
+    f.socket.receive('serialport:read',`<Jog|MPos:${f.machine.x.toFixed(3)},0.000,0.000|FS:250,0>`);
+    const positionSequence=f.session.positionSequence;
+    if(order==='raw-first') {
+      f.broadcast();
+      assert.equal(f.session.positionSequence,positionSequence,'The native echo is still the same sample');
+    }
+    assert.equal(f.grbl.jogPhase,'active',`Changing feedback must retain observation at ${sample*250} ms`);
+    assert.equal(f.motionListeners.size,1);
+    assert.equal(f.queries(),0,'Raw/native moving feedback must not trigger pendant queries');
+  }
+  f.machine.state='Idle'; f.machine.x=20; f.broadcast();
+  assert.equal(f.grbl.jogPhase,'idle','The fresh final endpoint releases ownership without operator input');
+  assert.equal(f.motionListeners.size,0);
+  assert.equal(f.jobs.size,0);
+  assert.equal(f.logs.length,0);
+  assert.equal(f.queries(),0);
+});
+
+test('unchanged raw Jog samples do not disguise lost position progress',()=>{
+  const f=gatedJogFixture(); f.grbl.jog('X',20,250);
+  f.machine.state='Jog'; f.machine.x=0.5; f.broadcast();
+  for(let sample=0;sample<11;sample++) {
+    f.advance(250);
+    f.socket.receive('serialport:read','<Jog|MPos:0.500,0.000,0.000|FS:250,0>');
+    f.broadcast();
+  }
+  f.advance(250);
+  assert.equal(f.grbl.jogPhase,'armed');
+  assert.equal(f.queries(),0);
+  assert.equal(f.motionListeners.size,0);
+  f.grbl.clearJog();
+});
+
 test('lost native moving feedback is bounded and never completes motion',()=>{
   const f=gatedJogFixture();
   f.grbl.jog('X',1,250);
