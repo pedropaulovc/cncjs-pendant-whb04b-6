@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [3.2.3] - 2026-11-02
+
+### Fixed
+
+- Start the widget in Step mode instead of MPG mode, so turning the wheel jogs by distance without first pressing Step.
+
 ## [3.2.2] - 2026-11-01
 
 ### Fixed

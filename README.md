@@ -108,8 +108,8 @@ the live key/dial/jog readout and push coordinates to the LCD.
 
 The mappings follow [LinuxCNC's xhc-whb04b-6 driver](https://www.linuxcnc.org/docs/master/html/en/man/man1/xhc-whb04b-6.1.html)
 with its feed and spindle wheel overrides enabled (`-f -s`). The widget starts
-in **MPG** mode. Press **Step** to jog by distance or **Continuous** to jog while
-turning the wheel. The current mode appears above the input readout.
+in **Step** mode, so the wheel jogs by distance. Press **Continuous** to jog
+while turning the wheel. The current mode appears above the input readout.
 
 | Control | Action |
 |---------|--------|

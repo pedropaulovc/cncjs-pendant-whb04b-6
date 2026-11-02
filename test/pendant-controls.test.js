@@ -32,7 +32,32 @@ function fixture() {
   return { session, grbl, controls, commands, logs, timer, input, press, ack };
 }
 
-test('both Lead hardware codes adjust spindle and never jog; startup MPG adjusts feed', () => {
+test('startup Step is idle until input and the first detent jogs the selected distance', () => {
+  const f = fixture();
+  assert.equal(f.controls.mode, 'step');
+  assert.deepEqual(f.commands, []);
+  assert.equal(f.grbl.pendingOverrides.size, 0);
+  f.timer.advance(3000);
+  assert.deepEqual(f.commands, []);
+  f.input({ rightDialCode: 0x0e, jog: -1 });
+  assert.equal(f.controls.mode, 'step');
+  assert.deepEqual(f.commands, [['gcode', '$J=G21 G91 X-0.0100 F250.000']]);
+  assert.equal(f.grbl.pendingOverrides.size, 0);
+});
+
+test('a fresh normal selector report preserves Step without sending commands or overrides', () => {
+  const f = fixture();
+  f.input({ rightDialCode: 0x0d });
+  assert.equal(f.controls.mode, 'step');
+  assert.deepEqual(f.commands, []);
+  assert.equal(f.grbl.pendingOverrides.size, 0);
+  f.input({ rightDialCode: 0x0e });
+  assert.equal(f.controls.mode, 'step');
+  assert.deepEqual(f.commands, []);
+  assert.equal(f.grbl.pendingOverrides.size, 0);
+});
+
+test('both initial Lead hardware codes adjust spindle and leaving Lead enables MPG feed adjustment', () => {
   for (const rightDialCode of [0x1c, 0x9b]) {
     const f = fixture(); f.input({ rightDialCode, jog: 3 });
     assert.equal(RightDial[rightDialCode], 'Lead');
@@ -41,9 +66,24 @@ test('both Lead hardware codes adjust spindle and never jog; startup MPG adjusts
     f.ack(100, 101); f.ack(100, 102); f.ack(100, 103);
     assert.deepEqual(f.commands.filter(([c]) => c === 'spindleOverride'), [['spindleOverride', 1], ['spindleOverride', 1], ['spindleOverride', 1]]);
     assert.equal(f.commands.some(([c]) => c === 'gcode'), false);
+    f.input({ rightDialCode: 0x1b });
+    assert.equal(f.controls.mode, 'mpg');
+    f.input({ jog: -1 });
+    assert.deepEqual(f.commands.filter(([c]) => c === 'feedOverride'), [['feedOverride', -1]]);
+    assert.equal(f.commands.some(([c]) => c === 'gcode'), false);
   }
-  const f = fixture(); f.input({ jog: -1 });
-  assert.equal(f.controls.mode, 'mpg'); assert.deepEqual(f.commands[0], ['feedOverride', -1]);
+});
+
+test('explicit modes survive a normal report and pendant reconnect', () => {
+  for (const [key, mode] of [[0x0e, 'continuous'], [0x0f, 'step']]) {
+    const f = fixture();
+    f.press(key);
+    assert.equal(f.controls.mode, mode);
+    f.controls.suspend(); f.grbl.clearOverrides(); f.controls.keys.clear();
+    f.input({});
+    assert.equal(f.controls.mode, mode);
+    assert.deepEqual(f.commands, []);
+  }
 });
 
 test('overrides wait for acknowledged Ov changes instead of flooding duplicate realtime bytes', () => {
@@ -66,11 +106,12 @@ test('override targets clamp, expire without feedback, and cannot cross reconnec
   assert.equal(f.commands.length, sent); assert.equal(f.grbl.pendingOverrides.size, 0);
 });
 
-test('first selector report sends no override; real changes set percentages and Lead exit restores MPG', () => {
-  const f = fixture(); f.input({ rightDialCode: 0x0d }); assert.deepEqual(f.commands, []);
-  f.input({ rightDialCode: 0x0e }); assert.equal(f.grbl.pendingOverrides.get('feed').target, 10);
+test('selector changes in MPG set feed percentages and clamp to the minimum', () => {
+  const f = fixture(); f.input({ rightDialCode: 0x9b }); assert.deepEqual(f.commands, []);
+  f.input({ rightDialCode: 0x0e });
+  assert.equal(f.controls.mode, 'mpg'); assert.equal(f.grbl.pendingOverrides.get('feed').target, 10);
   assert.match(f.logs.at(-1), /minimum is 10/);
-  f.input({ rightDialCode: 0x9b }); f.input({ rightDialCode: 0x1b });
+  f.input({ rightDialCode: 0x1b });
   assert.equal(f.controls.mode, 'mpg'); assert.equal(f.grbl.pendingOverrides.get('feed').target, 100);
 });
 
