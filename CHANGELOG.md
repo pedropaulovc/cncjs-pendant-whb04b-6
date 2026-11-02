@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here.
 
+## [3.2.8] - 2026-11-02
+
+### Added
+
+- An **i** button beside the Mode readout explains Step, Continuous, MPG, how to enter each, and the Lead dial position (spindle override, never motion). Hover or keyboard focus previews it, a click keeps it open, and a second click or Escape closes it. It opens in the page flow, so a 320 px widget column does not clip it.
+- **Default button reference**, collapsed inside **Macro buttons**, lists every built-in button and Fn action with the G-code or GRBL command it sends, including the built-in Fn+Spindle and Fn+S on/off functions and the unassigned default for Fn+Macro-10.
+
+### Changed
+
+- Macro assignments use the macro number printed on each pendant key: `Macro-1 (Fn+Feed+)`, `Macro-2 (Fn+Feed-)`, `Macro-5 (Fn+M-Home)`, `Macro-6 (Fn+Safe-Z)`, `Macro-7 (Fn+W-Home)`, `Macro-9 (Fn+Probe-Z)`, and `Macro-10 (Fn+Macro-10)`. Fn+Reset, Fn+Stop, and Fn+Start/Pause, which print no number, keep plain labels. Stored slot numbers are unchanged, so existing assignments keep working; logs use the same labels.
+- Settings save automatically on every change, and the Save settings button is gone. Invalid entries, such as empty or invalid custom G-code or an empty spindle increment, are reported with `Not saved:` and never replace the last valid configuration. Probe plate thickness still resets to 20 mm on reload.
+- A newly added macro row starts **Disabled** instead of Custom G-code. Disabled rows are saved as `{ "source": "disabled" }` and stay listed after a reload; pressing one logs that it is disabled, while an unassigned combination logs that it is not configured.
+- The socket, token, and port pills appear only while something is wrong; the pendant pill stays visible. **Re-read creds & connect** moved into Diagnostics.
+- The large-step setting explains that it affects Step only, at full axis velocity, and under G20 its label reads `5/10 in steps (127/254 mm)`. It remains opt-in; selector 1 stays allowed, which is 25.4 mm per detent under G20.
+
 ## [3.2.7] - 2026-11-02
 
 ### Changed

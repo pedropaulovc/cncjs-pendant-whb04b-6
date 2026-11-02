@@ -222,7 +222,7 @@ test('readout follows program units and known mode without presenting Step as a 
   f.input({ rightDialCode: 0x0f });
   assert.deepEqual(f.controls.readout, { mode: 'step (mm)', rate: '0.1 mm', largeSteps: '5/10 mm steps' });
   f.session.state.parserstate.modal.units = 'G20';
-  assert.deepEqual(f.controls.readout, { mode: 'step (in)', rate: '0.1 in', largeSteps: '5/10 in steps' });
+  assert.deepEqual(f.controls.readout, { mode: 'step (in)', rate: '0.1 in', largeSteps: '5/10 in steps (127/254 mm)' });
   f.session.state.parserstate.modal.units = undefined;
   assert.deepEqual(f.controls.readout, {
     mode: 'step (waiting for G20/G21)', rate: '0.1 (waiting for G20/G21)', largeSteps: '5/10 steps (waiting for G20/G21)',
@@ -347,7 +347,23 @@ test('Fn uses macros, spindle RPM/direction, coolant, and Macro10 toggles coordi
   f.press(15,0x0c); assert.deepEqual(f.commands.at(-1),['gcode','M7']);
   f.press(16); assert.equal(f.controls.coordinates,'machine');
   f.press(16); assert.equal(f.controls.coordinates,'work');
-  f.press(9,0x0c); assert.match(f.logs.at(-1),/Macro 6 is not configured/);
+  f.press(9,0x0c); assert.match(f.logs.at(-1),/Macro-6 \(Fn\+Safe-Z\) is not configured/);
+});
+
+test('explicitly disabled macros persist and never run, distinct from missing assignments, under unchanged slot IDs', () => {
+  const f = fixture(), selected = [];
+  f.controls.onSavedMacro = id => selected.push(id);
+  const config = parseConfig(JSON.parse(JSON.stringify({ macros: { 14: { source: 'disabled' }, 11: 'G0 X0' } })));
+  assert.deepEqual(config.macros, { 11: 'G0 X0', 14: { source: 'disabled' } });
+  f.controls.setConfig(config);
+  f.press(16, 0x0c);
+  assert.deepEqual(f.commands, []);
+  assert.match(f.logs.at(-1), /Macro-10 \(Fn\+Macro-10\) is disabled/);
+  f.press(2, 0x0c);
+  assert.match(f.logs.at(-1), /Fn\+Stop is not configured/);
+  f.press(1, 0x0c);
+  assert.deepEqual(f.commands, [['gcode', ['G0 X0']]]);
+  assert.deepEqual(selected, []);
 });
 
 test('Start/Pause uses CNCjs sender start/pause/resume; Stop still cancels', () => {

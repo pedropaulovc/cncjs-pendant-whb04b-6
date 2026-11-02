@@ -8,7 +8,19 @@ export const SELECTORS = {
 };
 const AXES = { 0x11: 'X', 0x12: 'Y', 0x13: 'Z' };
 const FN = 0x0c;
-const MACROS = { 1: 11, 2: 12, 3: 13, 4: 1, 5: 2, 8: 5, 9: 6, 10: 7, 13: 9, 16: 14 };
+// Assignable Fn combinations: physical key code, persisted LinuxCNC macro slot
+// (never renumbered), and the label printed on the key. Reset, Stop, and
+// Start/Pause print no macro number; Fn+Spindle+/-, Fn+S on/off (printed
+// Macro-3/4/8) keep their built-in spindle functions and are not assignable.
+export const MACRO_BUTTONS = [
+  { key: 0x04, slot: '1', button: 'Feed+', printed: 'Macro-1' }, { key: 0x05, slot: '2', button: 'Feed-', printed: 'Macro-2' },
+  { key: 0x08, slot: '5', button: 'M-Home', printed: 'Macro-5' }, { key: 0x09, slot: '6', button: 'Safe-Z', printed: 'Macro-6' },
+  { key: 0x0a, slot: '7', button: 'W-Home', printed: 'Macro-7' }, { key: 0x0d, slot: '9', button: 'Probe-Z', printed: 'Macro-9' },
+  { key: 0x10, slot: '14', button: 'Macro-10', printed: 'Macro-10' },
+  { key: 0x01, slot: '11', button: 'Reset' }, { key: 0x02, slot: '12', button: 'Stop' },
+  { key: 0x03, slot: '13', button: 'Start/Pause' },
+].map(({ printed, ...definition }) => ({ ...definition, name: printed ? `${printed} (Fn+${definition.button})` : `Fn+${definition.button}` }));
+const MACROS = Object.fromEntries(MACRO_BUTTONS.map(definition => [definition.key, definition]));
 const LEAD = new Set([0x1c, 0x9b]);
 export const CONFIG_KEY = 'whb04b-controls';
 export const DEFAULT_CONFIG = { largeSteps: 'disabled', spindleIncrement: 100, macros: {} };
@@ -18,11 +30,12 @@ export function parseConfig(value) {
   if (!['enabled', 'disabled'].includes(config.largeSteps)) throw new Error('Large steps must be enabled or disabled.');
   if (!Number.isFinite(config.spindleIncrement) || config.spindleIncrement <= 0) throw new Error('Spindle increment must be positive RPM.');
   if (!config.macros || typeof config.macros !== 'object' || Array.isArray(config.macros)) throw new Error('Macros must be an object keyed by macro number.');
-  const allowed = new Set(Object.values(MACROS).map(String));
+  const allowed = new Set(MACRO_BUTTONS.map(({ slot }) => slot));
   for (const [number, code] of Object.entries(config.macros)) {
     const custom = typeof code === 'string' && code.length <= 2000;
     const saved = code?.source === 'cncjs' && typeof code.id === 'string' && code.id.trim().length > 0 && code.id.length <= 200;
-    if (!allowed.has(number) || (!custom && !saved)) throw new Error(`Invalid macro ${number}; choose custom G-code or a saved CNCjs macro.`);
+    const disabled = code?.source === 'disabled';
+    if (!allowed.has(number) || (!custom && !saved && !disabled)) throw new Error(`Invalid macro ${number}; choose disabled, custom G-code, or a saved CNCjs macro.`);
   }
   return config;
 }
@@ -50,7 +63,10 @@ export class PendantControls {
       : !selection ? '—'
       : this.mode === 'step' ? `${selection.step} ${units ? units.label : '(waiting for G20/G21)'}`
       : `${selection.percent}% feed`;
-    return { mode, rate, largeSteps: `5/10 ${units ? `${units.label} steps` : 'steps (waiting for G20/G21)'}` };
+    const largeSteps = !units ? '5/10 steps (waiting for G20/G21)'
+      : units.scale === 1 ? `5/10 ${units.label} steps`
+      : `5/10 ${units.label} steps (${5 * units.scale}/${10 * units.scale} mm)`;
+    return { mode, rate, largeSteps };
   }
   setConfig(config) { this.suspend(); this.config = parseConfig(config); }
   suspend() {
@@ -67,13 +83,14 @@ export class PendantControls {
     this.log(`Mode: ${mode}.`);
     this.onMode(mode);
   }
-  macro(number) {
-    const assignment = this.config.macros[number];
+  macro({ slot, name }) {
+    const assignment = this.config.macros[slot];
+    if (assignment?.source === 'disabled') { this.log(`${name} is disabled.`); return; }
     if (assignment?.source === 'cncjs') { this.onSavedMacro(assignment.id); return; }
     const code = assignment?.trim();
-    if (!code) { this.log(`Macro ${number} is not configured.`); return; }
+    if (!code) { this.log(`${name} is not configured.`); return; }
     try { validateMacroContent(code); }
-    catch (error) { this.log(`Macro ${number}: ${error.message}`); return; }
+    catch (error) { this.log(`${name}: ${error.message}`); return; }
     this.grbl.macro(code.split(/\r?\n/).filter(line => line.trim()));
   }
   key(code, modifier) {

@@ -1,15 +1,9 @@
 import { validateMacroContent } from './macro-validation.js';
+import { MACRO_BUTTONS } from './pendant-controls.js';
 
-export const MACRO_BUTTONS = [
-  { slot: '1', button: 'Feed+' }, { slot: '2', button: 'Feed-' },
-  { slot: '5', button: 'M-Home' }, { slot: '6', button: 'Safe-Z' },
-  { slot: '7', button: 'W-Home' }, { slot: '9', button: 'Probe-Z' },
-  { slot: '11', button: 'Reset' }, { slot: '12', button: 'Stop' },
-  { slot: '13', button: 'Start/Pause' }, { slot: '14', button: 'Macro-10' },
-];
-
-// Edits live in these controls until Save settings is pressed. Refreshing the
-// server catalog replaces choices and previews, never the pending assignments.
+// Every listed row is a persisted assignment: Disabled rows stay listed and
+// never run; removing a row leaves its combination unassigned. Refreshing the
+// server catalog replaces choices and previews, never the listed assignments.
 export class MacroSettings {
   constructor({ container, status, refreshButton, addSelect, addButton, emptyState, onRefresh = () => {}, onChange = () => {} }) {
     Object.assign(this, { container, status, refreshButton, addSelect, addButton, emptyState, onRefresh, onChange });
@@ -24,7 +18,6 @@ export class MacroSettings {
       const definition = MACRO_BUTTONS.find(({ slot }) => slot === addSelect.value);
       if (!definition || this.rows.has(definition.slot)) return;
       const row = this.createRow(definition);
-      this.updateOptions(row, 'custom');
       this.updateAvailableButtons();
       row.select.focus();
       this.onChange();
@@ -39,14 +32,10 @@ export class MacroSettings {
     return element;
   }
 
-  createRow({ slot, button }) {
-    const name = `Fn + ${button}`;
+  createRow({ slot, name }) {
     const fieldset = this.element('fieldset');
     fieldset.className = 'macro-assignment';
     const legend = this.element('legend', name);
-    const number = this.element('span', `Macro ${slot}`);
-    number.className = 'macro-slot';
-    legend.append(number);
     const choice = this.element('label');
     choice.className = 'macro-choice';
     choice.append(this.element('span', 'Action'));
@@ -82,7 +71,7 @@ export class MacroSettings {
     });
     fieldset.append(legend, choice, code, preview, note, remove);
     this.container.append(fieldset);
-    const row = { select, code, preview, note };
+    const row = { name, select, code, preview, note };
     this.rows.set(slot, row);
     this.updateOptions(row, 'disabled');
     select.addEventListener('change', () => { this.updateRow(row); this.onChange(); });
@@ -99,7 +88,7 @@ export class MacroSettings {
   updateAvailableButtons() {
     const selected = this.addSelect.value;
     const available = MACRO_BUTTONS.filter(({ slot }) => !this.rows.has(slot));
-    this.addSelect.replaceChildren(...available.map(({ slot, button }) => this.option(slot, `Fn + ${button}`)));
+    this.addSelect.replaceChildren(...available.map(({ slot, name }) => this.option(slot, name)));
     if (available.some(({ slot }) => slot === selected)) this.addSelect.value = selected;
     this.addSelect.disabled = available.length === 0;
     this.addButton.disabled = available.length === 0;
@@ -126,18 +115,24 @@ export class MacroSettings {
     this.updateRow(row);
   }
 
+  // Custom G-code that cannot be saved yet; null when the row is savable.
+  draftError(row) {
+    if (row.select.value !== 'custom') return null;
+    if (!row.code.value.trim()) return 'Enter G-code to save this assignment.';
+    try { validateMacroContent(row.code.value); return null; }
+    catch (error) { return error.message; }
+  }
+
   updateRow(row) {
     const selection = row.select.value;
     row.code.hidden = selection !== 'custom';
     row.preview.hidden = true;
     row.note.dataset.state = 'normal';
-    if (selection === 'disabled') { row.note.textContent = 'This Fn combination has no macro assigned.'; return; }
+    if (selection === 'disabled') { row.note.textContent = 'Disabled: pressing this combination runs nothing.'; return; }
     if (selection === 'custom') {
-      row.note.textContent = 'Up to 2,000 characters. Save settings to apply your changes.';
-      if (row.code.value.trim()) {
-        try { validateMacroContent(row.code.value); }
-        catch (error) { row.note.dataset.state = 'missing'; row.note.textContent = error.message; }
-      }
+      const error = this.draftError(row);
+      row.note.textContent = error ?? 'Up to 2,000 characters. Saved automatically.';
+      if (error) row.note.dataset.state = 'missing';
       return;
     }
     const macro = this.catalog.get(selection.slice(6));
@@ -160,23 +155,29 @@ export class MacroSettings {
     this.container.replaceChildren();
     for (const definition of MACRO_BUTTONS) {
       const assignment = assignments?.[definition.slot];
-      if (!(typeof assignment === 'string' && assignment.trim()) && assignment?.source !== 'cncjs') continue;
+      const custom = typeof assignment === 'string' && assignment.trim();
+      if (!custom && !['cncjs', 'disabled'].includes(assignment?.source)) continue;
       const row = this.createRow(definition);
       if (assignment?.source === 'cncjs' && typeof assignment.name === 'string' && !this.catalog.has(assignment.id)) {
         this.macroNames.set(assignment.id, assignment.name);
       }
-      row.code.value = typeof assignment === 'string' ? assignment : '';
-      const selection = typeof assignment === 'string' && assignment.trim() ? 'custom'
-        : assignment?.source === 'cncjs' ? `cncjs:${assignment.id}` : 'disabled';
+      row.code.value = custom ? assignment : '';
+      const selection = custom ? 'custom' : assignment.source === 'cncjs' ? `cncjs:${assignment.id}` : 'disabled';
       this.updateOptions(row, selection);
     }
     this.updateAvailableButtons();
   }
 
+  // Throws for a custom draft that is empty or invalid, so it never replaces
+  // the saved configuration.
   getAssignments() {
     const assignments = {};
-    for (const [slot, { select, code }] of this.rows) {
-      if (select.value === 'custom' && code.value.trim()) assignments[slot] = code.value;
+    for (const [slot, row] of this.rows) {
+      const { select, code } = row;
+      const error = this.draftError(row);
+      if (error) throw new Error(`${row.name}: ${error}`);
+      if (select.value === 'disabled') assignments[slot] = { source: 'disabled' };
+      if (select.value === 'custom') assignments[slot] = code.value;
       if (select.value.startsWith('cncjs:')) {
         const id = select.value.slice(6);
         assignments[slot] = { source: 'cncjs', id };
