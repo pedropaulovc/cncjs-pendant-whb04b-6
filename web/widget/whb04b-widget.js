@@ -104,7 +104,6 @@ function setPill(id, on, text) {
 //---------------------------------------------------------------------------
 // Main
 //---------------------------------------------------------------------------
-let jogMode = JogMode.None;
 const pendant = new WHB04BWebHID();
 const session = new CncjsSession({
   io: (...args) => io(...args),
@@ -127,12 +126,12 @@ const controls = new PendantControls(grbl, {
   onSavedMacro: id => savedMacroRunner.run(id),
   onSuspend: () => savedMacroRunner.cancel(),
   onMode(mode) {
-    jogMode = { step: JogMode.Step, continuous: JogMode.Continuous }[mode] ?? JogMode.None;
     $('mode').textContent = mode;
     onControllerState('Grbl', session.state);
   },
   onCoordinates() { onControllerState('Grbl', session.state); },
 });
+$('mode').textContent = controls.mode;
 
 function refreshCtxUI() {
   setPill('tokenPill', !!ctx.token, ctx.token ? 'token ✓' : 'no token');
@@ -155,7 +154,7 @@ async function onControllerState(type, state) {
     const unsupportedAxes = [0x14, 0x15, 0x16].includes(controls.axisCode);
     const unavailable = session.status.phase !== 'joined' || unsupportedAxes;
     const frame = unavailable ? buildDisplayFrame({ jogMode: JogMode.Reset })
-      : controllerDisplayFrame(state, { coordinates: controls.coordinates, jogMode, reportUnits: session.settings.settings?.$13 });
+      : controllerDisplayFrame(state, { coordinates: controls.coordinates, jogMode: { step: JogMode.Step, continuous: JogMode.Continuous }[controls.mode] ?? JogMode.None, reportUnits: session.settings.settings?.$13 });
     const notice = unsupportedAxes ? 'Pendant LCD: A/B/C positions unavailable on this XYZ GRBL integration; showing RESET.'
       : !frame ? 'Pendant LCD: waiting for complete coordinates, Ov overrides, $13 report units, and G20/G21 mode.' : '';
     if (notice && notice !== displayNotice) log(notice);

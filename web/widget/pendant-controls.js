@@ -33,7 +33,7 @@ export class PendantControls {
     schedule = (fn, ms) => setTimeout(fn, ms), cancel = id => clearTimeout(id), now = () => performance.now(), config = DEFAULT_CONFIG } = {}) {
     Object.assign(this, { grbl, log, onMode, onCoordinates, onSavedMacro, onSuspend, schedule, cancel, now });
     this.config = parseConfig(config);
-    this.mode = 'mpg';
+    this.mode = 'step';
     this.coordinates = 'work';
     this.keys = new Set();
     this.axisCode = null;
