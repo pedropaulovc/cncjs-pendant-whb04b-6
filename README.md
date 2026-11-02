@@ -296,11 +296,12 @@ confirming report. Their result follows controller feedback, not a local counter
 ### Settings and GRBL limits
 
 **Pendant settings** provides probe plate thickness, spindle speed increment, and
-the large-step option. Spindle increment, large steps, and macro assignments save
-automatically in browser localStorage under `whb04b-controls`, separately for
-each browser/profile and CNCjs origin. An invalid value, such as an empty spindle
-increment, is reported and not saved. Probe plate thickness applies directly
-to probing and resets to 20 mm on reload. Jogging waits for valid controller axis
+the large-step option. Probe plate thickness (millimetres, 20 by default),
+spindle increment, large steps, and macro assignments save automatically in
+browser localStorage under `whb04b-controls`, separately for each browser/profile
+and CNCjs origin, and are restored on reload. An invalid value, such as an empty
+or negative probe plate thickness or an empty spindle increment, is reported and
+not saved; Probe-Z keeps using the last valid saved thickness. Jogging waits for valid controller axis
 maximum-rate settings and a known G20/G21 mode instead of guessing a machine
 speed or unit.
 If GRBL reports an error while the pendant owns a jog, the widget logs the error,

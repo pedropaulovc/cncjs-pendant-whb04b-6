@@ -103,12 +103,12 @@
     <details id="pendantSettings">
       <summary>Pendant settings</summary>
       <div class="row">
-        <label class="field">Probe plate mm<input id="thickness" type="number" step="0.01" value="20" /></label>
+        <label class="field">Probe plate mm<input id="thickness" type="number" min="0" step="0.01" value="20" /></label>
         <label class="field">Spindle increment (RPM)<input id="spindleIncrement" type="number" min="1" value="100" /></label>
         <label class="field"><span id="largeStepsLabel">5/10 steps (waiting for G20/G21)</span><select id="largeSteps" aria-describedby="largeStepsHelp"><option value="disabled">Disabled</option><option value="enabled">Enabled</option></select></label>
       </div>
       <p id="largeStepsHelp" class="settings-help">Step mode only. Right-dial 5 and 10 move 5 or 10 of the active unit per detent at the axis's full <code>$110</code>–<code>$112</code> rate: 5/10 mm under G21, 127/254 mm under G20. Continuous, MPG, and Lead ignore this setting. Selector 1 is always allowed: 1 in (25.4 mm) per detent under G20.</p>
-      <p class="settings-help">Changes save automatically. Probe plate mm is not saved and resets to 20 on reload.</p>
+      <p class="settings-help">Changes save automatically. Probe plate thickness is always millimetres, even under G20.</p>
     </details>
     <details id="macroSettings">
       <summary>Macro buttons</summary>

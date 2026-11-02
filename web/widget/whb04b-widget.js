@@ -123,7 +123,8 @@ const session = new CncjsSession({
   onState: onControllerState,
   onConfig: refreshMacros,
 });
-const grbl = new Grbl(session, () => $('thickness')?.valueAsNumber ?? NaN, log);
+// Probing uses the last valid saved thickness, never an invalid draft.
+const grbl = new Grbl(session, () => controls.config.probeThickness, log);
 const savedMacroRunner = new SavedMacroRunner({ session, grbl, library: macroLibrary, log });
 const controls = new PendantControls(grbl, {
   log,
@@ -204,7 +205,9 @@ function wireUI() {
   // but never replaces the last valid saved configuration.
   const save = () => {
     try {
-      const value = parseConfig({ macros: macroSettings.getAssignments(), spindleIncrement: Number($('spindleIncrement').value), largeSteps: $('largeSteps').value });
+      // valueAsNumber keeps an empty field NaN (rejected) instead of Number('') = 0.
+      const value = parseConfig({ macros: macroSettings.getAssignments(), spindleIncrement: $('spindleIncrement').valueAsNumber,
+        probeThickness: $('thickness').valueAsNumber, largeSteps: $('largeSteps').value });
       const serialized = JSON.stringify(value);
       if (serialized !== localStorage.getItem(CONFIG_KEY)) {
         localStorage.setItem(CONFIG_KEY, serialized);
@@ -222,8 +225,9 @@ function wireUI() {
     emptyState: $('macroEmpty'), onRefresh: refreshMacros, onChange: save });
   macroSettings.setAssignments(controls.config.macros);
   $('spindleIncrement').value = controls.config.spindleIncrement;
+  $('thickness').value = controls.config.probeThickness;
   $('largeSteps').value = controls.config.largeSteps;
-  for (const id of ['spindleIncrement', 'largeSteps']) $(id).addEventListener('input', save);
+  for (const id of ['spindleIncrement', 'thickness', 'largeSteps']) $(id).addEventListener('input', save);
 }
 
 function boot() {

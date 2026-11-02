@@ -282,7 +282,7 @@ test('Step refuses missing or invalid selected-axis limits rather than guessing 
 test('legacy Step feed is ignored and excluded from saved config without losing other settings', () => {
   for (const stepFeed of [0, 17, 99999, 'invalid']) {
     const f = fixture();
-    const settings = { largeSteps: 'enabled', spindleIncrement: 321,
+    const settings = { largeSteps: 'enabled', spindleIncrement: 321, probeThickness: 12.5,
       macros: { 1: 'M3', 2: { source: 'cncjs', id: 'saved', name: 'Saved macro' } } };
     const stored = JSON.stringify({ ...settings, stepFeed });
     f.controls.setConfig(parseConfig(JSON.parse(stored)));
@@ -383,7 +383,9 @@ test('manual controls refuse a running program and unknown spindle state; cooldo
 });
 
 test('invalid configuration fails without accepting arbitrary macro keys', () => {
-  for (const value of [{largeSteps:true},{spindleIncrement:NaN},{macros:[]},{macros:{3:'M3'}},{macros:{1:()=>{}}}]) assert.throws(()=>parseConfig(value));
+  for (const value of [{largeSteps:true},{spindleIncrement:NaN},{probeThickness:NaN},{probeThickness:-1},{probeThickness:null},{probeThickness:'20'},{macros:[]},{macros:{3:'M3'}},{macros:{1:()=>{}}}]) assert.throws(()=>parseConfig(value));
+  assert.equal(parseConfig({}).probeThickness, 20);
+  assert.equal(parseConfig({ probeThickness: 0 }).probeThickness, 0);
 });
 
 test('configured custom macros refuse unavailable bounds while ordinary commands still run', () => {
