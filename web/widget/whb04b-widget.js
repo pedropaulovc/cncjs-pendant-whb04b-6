@@ -123,8 +123,8 @@ const session = new CncjsSession({
   onState: onControllerState,
   onConfig: refreshMacros,
 });
-// Probing uses the last valid saved thickness, never an invalid draft.
-const grbl = new Grbl(session, () => controls.config.probeThickness, log);
+// Probing reads the live field: an empty or negative draft refuses Probe-Z.
+const grbl = new Grbl(session, () => $('thickness')?.valueAsNumber ?? NaN, log);
 const savedMacroRunner = new SavedMacroRunner({ session, grbl, library: macroLibrary, log });
 const controls = new PendantControls(grbl, {
   log,
@@ -208,11 +208,11 @@ function wireUI() {
       // valueAsNumber keeps an empty field NaN (rejected) instead of Number('') = 0.
       const value = parseConfig({ macros: macroSettings.getAssignments(), spindleIncrement: $('spindleIncrement').valueAsNumber,
         probeThickness: $('thickness').valueAsNumber, largeSteps: $('largeSteps').value });
+      // Another widget may already have stored this value; only the storage
+      // write is skipped then. This widget's runtime always takes the value.
       const serialized = JSON.stringify(value);
-      if (serialized !== localStorage.getItem(CONFIG_KEY)) {
-        localStorage.setItem(CONFIG_KEY, serialized);
-        controls.setConfig(value);
-      }
+      if (serialized !== localStorage.getItem(CONFIG_KEY)) localStorage.setItem(CONFIG_KEY, serialized);
+      controls.setConfig(value);
       settingsStatus.dataset.state = 'saved';
       settingsStatus.textContent = 'Settings saved automatically for this browser and CNCjs address.';
     } catch (error) {

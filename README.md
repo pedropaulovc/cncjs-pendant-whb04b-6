@@ -301,7 +301,8 @@ spindle increment, large steps, and macro assignments save automatically in
 browser localStorage under `whb04b-controls`, separately for each browser/profile
 and CNCjs origin, and are restored on reload. An invalid value, such as an empty
 or negative probe plate thickness or an empty spindle increment, is reported and
-not saved; Probe-Z keeps using the last valid saved thickness. Jogging waits for valid controller axis
+not saved; while the probe plate field is invalid, Probe-Z refuses to probe rather
+than use the saved value. Jogging waits for valid controller axis
 maximum-rate settings and a known G20/G21 mode instead of guessing a machine
 speed or unit.
 If GRBL reports an error while the pendant owns a jog, the widget logs the error,
