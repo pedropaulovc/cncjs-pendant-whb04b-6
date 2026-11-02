@@ -82,7 +82,8 @@ parent frame's credentials. The layout wraps to fit narrow widget columns.
 The LCD shows work coordinates (`X1/Y1/Z1`) by default; Macro-10 switches to
 machine coordinates (`X/Y/Z`). Numeric values follow the controller's active
 G20 (inches) or G21 (millimetres) mode, converting GRBL's `$13` report units as
-needed. Changing G20/G21 updates the displayed numbers without moving an axis.
+needed. Changing G20/G21 updates the displayed numbers and the units of later
+Step detents without moving an axis. `$13` never selects jog units.
 Feed and spindle fields show **override percentages**, matching CNCjs's override
 controls even when the machine is stationary. They do not show actual feed or RPM.
 The mode indicator follows MPG, Step, and Continuous. LCD write failures appear
@@ -96,11 +97,14 @@ or the sole open port if CNCjs has not supplied a selection. With several open
 ports it waits for an explicit selection. It reconnects after a network drop
 and discards pendant commands while disconnected instead of queuing them.
 
-Jog distances and feed rates are always millimetres. Safe-Z moves to machine
-Z = -5 mm; W-Home uses that move before travelling to G54 X0 Y0. Verify that
-height against your machine and workholding before using either key. Probe-Z
+Step distances and `$J` lines use the active G20/G21 units. Safe-Z moves to
+machine Z = -5 mm; W-Home uses that move before travelling to G54 X0 Y0. Verify
+that height against your machine and workholding before using either key. Probe-Z
 travels up to 50 mm downward at 120 mm/min and uses **Pendant settings → Probe
-plate mm** (20 mm by default). These macros select G21 and leave the controller in mm.
+plate mm** (20 mm by default). Safe-Z, W-Home, and Probe-Z are deliberately
+millimetres: each selects G21 itself, and the probe plate thickness is always
+millimetres. They leave the controller in G21, so later Step and Continuous jogs
+also use millimetres until G20 is commanded again.
 
 ## Use the standalone tester
 
@@ -190,23 +194,41 @@ and `npm pack` build the pinned parser automatically and include its license.
 - **Lead:** each detent changes spindle override by one percentage point. Both
   known Lead codes (`0x1c` and `0x9b`) are recognized. Lead never moves an axis.
   Leaving Lead returns to MPG.
-- **Step:** each detent moves 0.001, 0.01, 0.1, 1, 5, or 10 mm according to the
-  selector. The last two positions require **5/10 mm steps → Enabled**, matching
-  LinuxCNC's opt-in big-step option. The dial controls distance only: Step requests
+- **Step:** each detent moves the selector's value in the controller's active
+  units: inches under G20 or millimetres under G21. The modal G20/G21 state
+  picks the units; `$13` never does. The same selector travels 25.4 times
+  farther under G20: 0.1 is 0.1 in (2.54 mm) under G20 but 0.1 mm under G21.
+  Selector 1 is allowed in either unit, so under G20 it moves 1 in (25.4 mm)
+  per detent without the opt-in. The last two positions, 5 and 10 (the large
+  steps), require **5/10 steps → Enabled** in either unit: the opt-in tests the
+  numeric selector, not physical distance; under G20 those detents are 5 in
+  (127 mm) and 10 in (254 mm). The pendant labels them `5/10 in steps` or
+  `5/10 mm steps`, matching LinuxCNC's opt-in big-step option. The dial controls
+  distance only: Step requests
   the selected axis's full GRBL maximum rate (`$110` for X, `$111` for Y, `$112`
   for Z), independent of program Feed %. This follows
   [LinuxCNC's Step distance scale](https://github.com/LinuxCNC/linuxcnc/blob/master/src/hal/user_comps/xhc-whb04b-6/pendant.cc#L1397-L1434)
   and [axis velocity limit](https://github.com/LinuxCNC/linuxcnc/blob/master/src/emc/motion/axis.c#L424-L489).
   **Warning: Step requests full axis velocity, even at a low Feed %; verify your
-  machine's axis limits and clearance before turning the wheel.** Acceleration
+  machine's axis limits and clearance before turning the wheel, especially under
+  G20, where the same selector is 25.4 times longer.** Acceleration
   and move length may prevent reaching that velocity. These remain cancellable
   `$J` jogs, not `G0` commands. A step finishes after the wheel stops.
   Only one Step line waits for the controller's `ok` at a time. Detents turned
   meanwhile are merged into a single line sent when that `ok` arrives, so a fast
   wheel cannot overrun the controller's serial or planner buffers. Every detent
-  still travels its full distance: turning faster than the axis can move means
-  motion continues after the wheel stops. Stop, or changing mode or axis,
-  discards merged detents that were not yet sent.
+  still travels its full distance, except as described below. Turning faster
+  than the axis can move means motion continues after the wheel stops. Stop, or
+  changing mode or axis, discards merged detents that were not yet sent. Only an
+  unknown G20/G21 state retains merged detents: they stay in physical millimetres
+  until a mode is known. While the state is unknown, the readouts show
+  `waiting for G20/G21`, new Step wheel input is ignored and logged, and Continuous
+  refuses to jog. Once a mode is known, a switch between G20 and G21 does not
+  reinterpret merged detents: they go out with the same physical travel in the
+  mode active when they are sent. If the active mode cannot write their distance
+  or feed (for example, one that rounds to zero), they are discarded with a log
+  message and never held for a retry. Detents that net to zero, such as a forward
+  and a back detent, cancel without sending a line.
 - **Continuous:** the selector chooses 2, 5, 10, 30, 60, or 100% of the selected
   axis's GRBL maximum rate (`$110`–`$112`). Motion is issued as one outstanding
   segment with 200 ms of travel at that feed; a 180 ms gap between wheel reports cancels
@@ -217,6 +239,8 @@ and `npm pack` build the pinned parser automatically and include its license.
   connection drops. Very low rates whose segments fall below position/step
   resolution are refused with a log message. Browser/serial latency and GRBL
   deceleration add to stopping time.
+  Continuous's physical speed and 200 ms segment are the same under G20 or G21;
+  only the `$J` line changes, written in inches and in/min under G20.
 
 Step and Continuous observe native CNCjs motion updates while a jog is active
 or canceling. A fresh changed position at the endpoint completes the jog without
@@ -258,7 +282,8 @@ the large-step option. **Save settings** stores spindle increment, large steps,
 and macro assignments in browser localStorage under `whb04b-controls`, separately
 for each browser/profile and CNCjs origin. Probe plate thickness applies directly
 to probing and resets to 20 mm on reload. Jogging waits for valid controller axis
-maximum-rate settings instead of guessing a machine speed.
+maximum-rate settings and a known G20/G21 mode instead of guessing a machine
+speed or unit.
 If GRBL reports an error while the pendant owns a jog, the widget logs the error,
 cancels queued jogging, and waits for two Idle reports before accepting another jog.
 
@@ -323,6 +348,12 @@ For a safety-door, sleep, or check state, inspect CNCjs; Reset remains available
   `command` with the active port against the already-open serial port. CNCjs's
   `open` socket RPC joins that controller and supplies its initial state. The
   widget only requests ports reported as in use; it never sends a close command.
+  The low-level `jog(axis, distance, feed)` in `web/widget/grbl.js` takes
+  millimetres and mm/min. Only its `$J` line uses the active G20/G21 units, with
+  six decimal places for distance and feed under G20 and four and three under
+  G21. Feed is rounded down, so it never exceeds the requested or axis-maximum
+  speed. A distance or feed that cannot be written in the active units, such as
+  one that rounds to zero, is refused with a log message.
 
 ## Notes
 

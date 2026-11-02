@@ -62,7 +62,7 @@ function joinWithController(f, settings) {
   f.list([{ port: 'COM5', inuse: true }]);
   f.socket.receive('serialport:open', { port: 'COM5', controllerType: 'Grbl' });
   f.socket.receive('controller:settings', 'Grbl', { version: '', parameters: {}, settings });
-  f.socket.receive('controller:state', 'Grbl', { status: { activeState: 'Idle', mpos: { x: '0.000', y: '0.000', z: '0.000' } } });
+  f.socket.receive('controller:state', 'Grbl', { parserstate: { modal: { units: 'G21' } }, status: { activeState: 'Idle', mpos: { x: '0.000', y: '0.000', z: '0.000' } } });
   f.socket.receive('workflow:state', 'idle');
   f.emitted.findLast(([event]) => event === 'open')[3](null);
 }
@@ -351,19 +351,19 @@ test('port close disarms commands and resumes discovery without closing hardware
   assert.equal(f.emitted.some(([event]) => event === 'close' || event === 'command'), false);
 });
 
-test('jog and fixed-distance macros use mm even after a prior G20 command', (t) => {
+test('fixed SafeZ, WHome, and probe macros remain G21 with millimetre plate thickness under G20', (t) => {
   const commands = [];
   const grbl = new Grbl({ command: (...args) => commands.push(args), status: { phase: 'joined' }, subscribeMotion: () => () => {},
     jog: code => { commands.push(['gcode', code]); return { state: 'queued' }; },
+    state: { parserstate: { modal: { units: 'G20' } } },
     stopPhase: 'idle', workflowState: 'idle', activeState: 'Idle', settings: { settings: { $110: '3000' } } }, () => 12.5);
   t.after(() => grbl.clearJog());
-  grbl.jog('X', -0.2, 250);
-  assert.deepEqual(commands.pop(), ['gcode', '$J=G21 G91 X-0.2000 F250.000']);
+  grbl.safeZ();
+  assert.deepEqual(commands.pop(), ['gcode', 'G21 G53 G0 G90 Z-5']);
   grbl.wcsHome();
   assert.deepEqual(commands.splice(0), [['gcode', ['G21 G53 G0 G90 Z-5', 'G21 G54 G0 G90 X0 Y0']]]);
   grbl.probeZ();
-  assert.equal(commands[0][1][0], 'G21 G91');
-  assert.equal(commands[0][1][2], 'G10 L20 P1 Z12.501');
+  assert.deepEqual(commands[0][1], ['G21 G91', 'G38.2 Z-50 F120', 'G10 L20 P1 Z12.501', 'G0 Z3', 'G90']);
   grbl.clearJog();
 });
 
@@ -457,13 +457,14 @@ function gatedJogFixture(acknowledgements = 'immediate') {
   f.socket.receive('serialport:read','Grbl 1.1h');
   f.socket.receive('controller:settings','Grbl',{settings:{$13:'0',$110:'3000',$111:'3000',$112:'1000'}});
   const machine={state:'Idle',x:0,y:0,z:0};
-  let lastStatus;
-  const broadcast=(parserstate)=>{
+  let lastStatus, parserstate={modal:{units:'G21'}};
+  const broadcast=(nextParserstate)=>{
+    if(nextParserstate) parserstate=nextParserstate;
     const status={activeState:machine.state,mpos:Object.fromEntries(['x','y','z'].map(axis=>[axis,machine[axis].toFixed(3)]))};
     const serialized=JSON.stringify(status);
-    if(serialized===lastStatus && !parserstate && f.session.positionReport) return;
+    if(serialized===lastStatus && !nextParserstate && f.session.positionReport) return;
     lastStatus=serialized;
-    f.socket.receive('controller:state','Grbl',{status,...(parserstate?{parserstate}:{})});
+    f.socket.receive('controller:state','Grbl',{status,parserstate});
   };
   broadcast();
   const jobs=new Set(), deadlines=new Map(), logs=[], deliveries=[];
@@ -982,7 +983,7 @@ test('a rejected written-only jog cancels motion without discarding unrelated fe
 // yields mpos.x='10.000', wpos.x='0.000'. No CNCjs runtime dependency is needed.
 for(const kind of ['MPos','WPos']) for(const order of ['raw-first','broadcast-first']) test(`jog completion survives ${kind} reports and dual-frame broadcasts (${order})`,()=>{
   const f=gatedJogFixture();
-  const broadcast=x=>f.socket.receive('controller:state','Grbl',{status:{activeState:'Idle',
+  const broadcast=x=>f.socket.receive('controller:state','Grbl',{parserstate:{modal:{units:'G21'}},status:{activeState:'Idle',
     mpos:{x:(x+(kind==='WPos'?10:0)).toFixed(3),y:'0.000',z:'0.000'},
     wpos:{x:(x-(kind==='MPos'?10:0)).toFixed(3),y:'0.000',z:'0.000'}}});
   const raw=x=>f.socket.receive('serialport:read',`<Idle|${kind}:${x.toFixed(3)},0.000,0.000|FS:0,0>`);
@@ -1000,7 +1001,7 @@ for(const kind of ['MPos','WPos']) for(const order of ['raw-first','broadcast-fi
 
 test('an offset-only WPos broadcast refreshes its own sample without refreshing MPos',()=>{
   const f=gatedJogFixture();
-  const broadcast=x=>f.socket.receive('controller:state','Grbl',{status:{activeState:'Idle',
+  const broadcast=x=>f.socket.receive('controller:state','Grbl',{parserstate:{modal:{units:'G21'}},status:{activeState:'Idle',
     mpos:{x:'10.000',y:'0.000',z:'0.000'},wpos:{x,y:'0.000',z:'0.000'}}});
   broadcast('0.000');
   const machineSequence=f.session.positionReports.MPos.sequence;
@@ -1040,7 +1041,7 @@ test('both frame caches retain their own reporting units and are cleared on rese
 
 for(const travel of ['sub-resolution','out-and-back']) test(`unchanged dual-frame ${travel} needs bounded raw Idle confirmation`,()=>{
   const f=gatedJogFixture(); f.session.settings.settings.$100='200';
-  const broadcast=()=>f.socket.receive('controller:state','Grbl',{status:{activeState:f.machine.state,
+  const broadcast=()=>f.socket.receive('controller:state','Grbl',{parserstate:{modal:{units:'G21'}},status:{activeState:f.machine.state,
     mpos:{x:f.machine.x.toFixed(3),y:'0.000',z:'0.000'},
     wpos:{x:(f.machine.x-10).toFixed(3),y:'0.000',z:'0.000'}}});
   broadcast();
@@ -1365,7 +1366,7 @@ test('zero-sum backlog after its trusted ACK re-evaluates unchanged Idle with a 
 
 for(const kind of ['MPos','WPos']) test(`a native dual-frame echo of raw ${kind} preserves sample freshness`,()=>{
   const f=gatedJogFixture();
-  const native=x=>f.socket.receive('controller:state','Grbl',{status:{activeState:'Idle',
+  const native=x=>f.socket.receive('controller:state','Grbl',{parserstate:{modal:{units:'G21'}},status:{activeState:'Idle',
     mpos:{x:(x+(kind==='WPos'?10:0)).toFixed(3),y:'0.000',z:'0.000'},
     wpos:{x:(x-(kind==='MPos'?10:0)).toFixed(3),y:'0.000',z:'0.000'}}});
   native(0);
@@ -1480,4 +1481,366 @@ test('an inline rejected jog ACK starts ordinary cancellation with exactly one o
   assert.equal(f.motionListeners.size,0);
   assert.equal(f.session.motionListeners.size,0);
   assert.equal(f.jobs.size,0);
+});
+
+function jogCommands(f) {
+  return stopCommands(f).filter(([name])=>name==='gcode');
+}
+
+function acknowledgeJog(f, command=jogCommands(f).at(-1)) {
+  const [,code,context]=command;
+  f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
+  f.socket.receive('serialport:read','ok');
+}
+
+function assertNear(actual, expected, tolerance=1e-10) {
+  assert.ok(Math.abs(actual-expected)<=tolerance,`${actual} must be within ${tolerance} of ${expected}`);
+}
+
+for(const [code,scale,label] of [['G20',25.4,'in'],['G21',1,'mm']]) {
+  for(const axis of ['X','Y','Z']) for(const direction of [-1,1]) {
+    test(`${code} ${axis} ${direction>0?'+':'-'} jog serializes internal millimetres in current modal units`,()=>{
+      const f=gatedJogFixture();
+      f.broadcast({modal:{units:code}});
+      assert.equal(f.grbl.jogUnits.code,code);
+      assert.equal(f.grbl.jogUnits.scale,scale);
+      assert.equal(f.grbl.jogUnits.label,label);
+      const parserstate=f.session.state.parserstate;
+      assert.equal(f.grbl.jog(axis,direction*25.4,254),'sent');
+      const distance=code==='G20'?`${direction.toFixed(6)}`:(direction*25.4).toFixed(4);
+      const feed=code==='G20'?'10.000000':'254.000';
+      assert.equal(jogCommands(f).at(-1)[1],`$J=${code} G91 ${axis}${distance} F${feed}`);
+      assertNear(f.grbl.jogTarget.value,direction*25.4);
+      assert.equal(f.session.state.parserstate,parserstate,'$J must not rewrite the program parser state');
+      assert.equal(parserstate.modal.units,code);
+      f.machine[axis.toLowerCase()]=direction*25.4; f.broadcast();
+      assert.equal(f.grbl.jogPhase,'idle');
+      f.grbl.clearJog();
+    });
+  }
+}
+
+for(const code of ['G20','G21']) for(const reportUnits of ['0','1']) for(const kind of ['MPos','WPos']) {
+  test(`${code} wire units are independent of $13=${reportUnits} ${kind} reports`,()=>{
+    const f=gatedJogFixture();
+    f.broadcast({modal:{units:code}});
+    f.session.settings.settings.$13=reportUnits;
+    const report=mm=>f.socket.receive('serialport:read',`<Idle|${kind}:${(mm/(reportUnits==='1'?25.4:1)).toFixed(reportUnits==='1'?4:3)},0,0|FS:0,0>`);
+    report(25.4);
+    assert.equal(f.grbl.jog('X',25.4,254),'sent');
+    assert.equal(jogCommands(f).at(-1)[1],code==='G20'?'$J=G20 G91 X1.000000 F10.000000':'$J=G21 G91 X25.4000 F254.000');
+    assert.equal(f.grbl.jogTarget.kind,kind);
+    assertNear(f.grbl.jogTarget.value,50.8);
+    report(50.8);
+    assert.equal(f.grbl.jogPhase,'idle');
+    assert.equal(f.session.settings.settings.$13,reportUnits);
+    f.grbl.clearJog();
+  });
+}
+
+test('G20 lowlevel 5 mm uses the rounded wire distance for its physical target and completes near 5 mm',()=>{
+  const f=gatedJogFixture();
+  f.broadcast({modal:{units:'G20'}});
+  assert.equal(f.grbl.jog('X',5,254),'sent');
+  assert.equal(jogCommands(f).at(-1)[1],'$J=G20 G91 X0.196850 F10.000000');
+  assertNear(f.grbl.jogTarget.value,4.99999);
+  f.machine.x=5; f.broadcast();
+  assert.equal(f.grbl.jogPhase,'idle');
+  assert.equal(f.queries(),0);
+});
+
+for(const code of ['G20','G21']) test(`${code} target follows actual wire rounding rather than requested distance`,()=>{
+  const f=gatedJogFixture();
+  f.broadcast({modal:{units:code}});
+  assert.equal(f.grbl.jog('Z',-1.23456789,100),'sent');
+  const wire=Number(jogCommands(f).at(-1)[1].match(/ Z(-?[\d.]+)/)[1]);
+  assertNear(f.grbl.jogTarget.value,wire*(code==='G20'?25.4:1));
+  assert.notEqual(f.grbl.jogTarget.value,-1.23456789);
+  f.grbl.clearJog();
+});
+
+for(const units of [undefined,null,'','G22','g20',20,21]) test(`unknown modal ${String(units)} refuses motion and recovers only after explicit known units`,()=>{
+  const f=gatedJogFixture();
+  f.broadcast({modal:{units}});
+  assert.equal(f.grbl.jogUnits,null);
+  assert.equal(f.grbl.jog('X',5,254),'dropped');
+  assert.equal(f.grbl.jogPulse('X',5,254),'dropped');
+  assert.equal(jogCommands(f).length,0);
+  assert.equal(f.grbl.jogTarget,null);
+  f.broadcast({modal:{units:'G21'}});
+  assert.equal(f.grbl.jogUnits.code,'G21');
+  assert.equal(f.grbl.jogUnits.scale,1);
+  assert.equal(f.grbl.jogUnits.label,'mm');
+  assert.equal(f.grbl.jog('X',5,254),'sent');
+  f.grbl.clearJog();
+});
+
+for(const [code,scale,digits] of [['G20',25.4,6],['G21',1,3]]) for(const axis of ['X','Y','Z']) {
+  test(`${code} ${axis} feed conversion floors without exceeding its physical axis maximum`,()=>{
+    const f=gatedJogFixture();
+    f.broadcast({modal:{units:code}});
+    const max=12.3456789;
+    f.session.settings.settings[`$${110+['X','Y','Z'].indexOf(axis)}`]=String(max);
+    assert.equal(f.grbl.jog(axis,1,1000),'sent');
+    const wireFeed=Number(jogCommands(f).at(-1)[1].match(/ F([\d.]+)/)[1]);
+    assert.ok(wireFeed>0);
+    assert.ok(wireFeed*scale<=max);
+    assert.ok(max-wireFeed*scale<=scale/10**digits+1e-12,'Feed flooring loses at most one wire precision quantum');
+    f.grbl.clearJog();
+  });
+  test(`${code} ${axis} refuses a positive feed that floors to zero`,()=>{
+    const f=gatedJogFixture();
+    f.broadcast({modal:{units:code}});
+    assert.equal(f.grbl.jog(axis,1,scale*10**(-digits)/4),'dropped');
+    assert.equal(jogCommands(f).length,0);
+    assert.equal(f.grbl.jogTarget,null);
+  });
+}
+
+for(const [before,after] of [['G20','G21'],['G21','G20']]) test(`pending ACK preserves physical backlog across ${before} to ${after}`,()=>{
+  const f=gatedJogFixture('delayed');
+  f.broadcast({modal:{units:before}});
+  assert.equal(f.grbl.jog('X',25.4,254),'sent');
+  assert.equal(f.grbl.jog('X',12.7,254),'buffered');
+  assertNear(f.grbl.jogBacklog.distance,12.7);
+  f.broadcast({modal:{units:after}});
+  f.tick(50);
+  assert.equal(jogCommands(f).length,1,'Known unit changes cannot bypass pending ACK');
+  assertNear(f.grbl.jogBacklog.distance,12.7);
+  acknowledgeJog(f,jogCommands(f)[0]); f.tick(50);
+  assert.equal(jogCommands(f).at(-1)[1],after==='G20'?'$J=G20 G91 X0.500000 F10.000000':'$J=G21 G91 X12.7000 F254.000');
+  assertNear(f.grbl.jogTarget.value,38.1);
+  assert.equal(f.grbl.jogBacklog,null);
+  acknowledgeJog(f);
+  f.machine.x=38.1; f.broadcast();
+  assert.equal(f.grbl.jogPhase,'idle');
+  f.grbl.clearJog();
+});
+
+for(const code of ['G20','G21']) test(`${code} backlog remains frozen in physical millimetres while modal units are unknown`,()=>{
+  const f=gatedJogFixture('delayed');
+  f.broadcast({modal:{units:code}});
+  f.grbl.jog('X',25.4,254);
+  assert.equal(f.grbl.jog('X',12.7,254),'buffered');
+  f.broadcast({modal:{}});
+  acknowledgeJog(f,jogCommands(f)[0]);
+  f.tick(50);
+  const notices=f.logs.length;
+  assert.ok(notices>0,'Unknown-unit backlog refusal must explain why motion is frozen');
+  for(let n=0;n<4;n++) f.tick(50);
+  assert.equal(f.logs.length,notices,'Retrying frozen backlog must not repeat the refusal');
+  assert.equal(jogCommands(f).length,1);
+  assertNear(f.grbl.jogBacklog.distance,12.7);
+  assertNear(f.grbl.jogBacklog.feed,254);
+  assert.equal(f.grbl.jog('X',2,100),'dropped','Unknown-unit input must not enter the frozen backlog');
+  assertNear(f.grbl.jogBacklog.distance,12.7);
+  const restored=code==='G20'?'G21':'G20';
+  f.broadcast({modal:{units:restored}});
+  f.tick(50);
+  assert.equal(jogCommands(f).length,2);
+  assert.equal(jogCommands(f).at(-1)[1],restored==='G20'?'$J=G20 G91 X0.500000 F10.000000':'$J=G21 G91 X12.7000 F254.000');
+  assertNear(f.grbl.jogTarget.value,38.1);
+  assert.equal(f.grbl.jogBacklog,null);
+  f.grbl.clearJog();
+});
+
+test('Continuous lowlevel pulses keep physical distance and speed while current wire units change',()=>{
+  const f=gatedJogFixture();
+  f.broadcast({modal:{units:'G20'}});
+  assert.equal(f.grbl.jogPulse('Y',12.7,254),'sent');
+  assert.equal(jogCommands(f).at(-1)[1],'$J=G20 G91 Y0.500000 F10.000000');
+  assertNear(f.grbl.jogTarget.value,12.7);
+  assert.equal(f.grbl.jogPulse('Y',12.7,254),'pending');
+  f.machine.y=12.7; f.broadcast();
+  assert.equal(f.grbl.jogPhase,'idle');
+  f.broadcast({modal:{units:'G21'}});
+  assert.equal(f.grbl.jogPulse('Y',12.7,254),'sent');
+  assert.equal(jogCommands(f).at(-1)[1],'$J=G21 G91 Y12.7000 F254.000');
+  assertNear(f.grbl.jogTarget.value,25.4);
+  f.machine.y=25.4; f.broadcast();
+  assert.equal(f.grbl.jogPhase,'idle');
+});
+
+for(const code of ['G20','G21']) test(`inline modal mutation after ${code} emission preserves the sent unit snapshot and baselines`,()=>{
+  const f=gatedJogFixture('delayed');
+  f.broadcast({modal:{units:code}});
+  const generation=f.session.generation, epoch=f.session.motionEpoch, workflowEpoch=f.session.workflowEpoch;
+  const errorSequence=f.session.errorSequence, positionSequence=f.session.positionReport.sequence, sequence=f.session.reportSequence;
+  const send=f.session.jog.bind(f.session);
+  f.session.jog=wire=>{
+    const receipt=send(wire);
+    f.session.state.parserstate.modal.units=code==='G20'?'G21':'G20';
+    return receipt;
+  };
+  assert.equal(f.grbl.jog('X',5,254),'sent');
+  assert.equal(jogCommands(f).at(-1)[1],code==='G20'?'$J=G20 G91 X0.196850 F10.000000':'$J=G21 G91 X5.0000 F254.000');
+  assertNear(f.grbl.jogTarget.value,code==='G20'?4.99999:5);
+  assert.equal(f.grbl.jogGeneration,generation);
+  assert.equal(f.grbl.jogEpoch,epoch);
+  assert.equal(f.grbl.jogWorkflowEpoch,workflowEpoch);
+  assert.equal(f.grbl.jogErrorSequence,errorSequence);
+  assert.equal(f.grbl.jogPositionSequence,positionSequence);
+  assert.equal(f.grbl.jogSequence,sequence);
+  f.grbl.clearJog();
+});
+
+for(const travel of ['tiny','out-and-back','clipped','cancel']) test(`G20 ${travel} cannot bypass post-ACK raw Idle guards`,()=>{
+  const f=gatedJogFixture('delayed');
+  f.broadcast({modal:{units:'G20'}});
+  f.session.settings.settings.$100='200';
+  const tiny=travel==='tiny';
+  assert.equal(f.grbl.jog('X',tiny?0.001:1,254),'sent');
+  acknowledgeJog(f);
+  if(travel==='out-and-back') {
+    assert.equal(f.grbl.jog('X',-1,254),'sent');
+    acknowledgeJog(f);
+  }
+  if(travel==='cancel') {
+    f.machine.state='Jog'; f.broadcast();
+    f.grbl.cancelJog();
+    f.machine.state='Idle'; f.machine.x=0.25; f.broadcast();
+  }
+  if(travel==='clipped') {
+    f.machine.state='Jog'; f.machine.x=0.25; f.broadcast();
+    f.machine.state='Idle'; f.broadcast();
+  }
+  // Parser-only and unchanged native reports are not raw completion evidence.
+  f.broadcast({modal:{units:'G21'}});
+  f.broadcast({modal:{units:'G20'}});
+  assert.equal(f.queries(),0);
+  const needed=travel==='clipped'?5:2;
+  for(let n=0;n<needed;n++) {
+    f.tick(n===0?750:250);
+    assert.equal(f.queries(),n+1);
+    assert.equal(f.grbl.jogPhase,n===needed-1?'idle':travel==='cancel'?'canceling':'active');
+  }
+  if(travel==='clipped') assert.match(f.logs.at(-1),/ended short of its target/);
+  assert.equal(f.jobs.size,0);
+  assert.equal(f.motionListeners.size,0);
+  f.grbl.clearJog();
+});
+
+test('a G20 distance at six-decimal inch resolution is not rejected by the old millimetre threshold',()=>{
+  const f=gatedJogFixture();
+  f.broadcast({modal:{units:'G20'}});
+  assert.equal(f.grbl.jog('X',0.0000254,254),'sent');
+  assert.equal(jogCommands(f).at(-1)[1],'$J=G20 G91 X0.000001 F10.000000');
+  assertNear(f.grbl.jogTarget.value,0.0000254);
+  f.grbl.clearJog();
+});
+
+test('canceling an unknown-unit frozen backlog discards it and cannot revive motion on recovery',()=>{
+  const f=gatedJogFixture('delayed');
+  f.broadcast({modal:{units:'G20'}});
+  f.grbl.jog('X',25.4,254); f.grbl.jog('X',12.7,254);
+  acknowledgeJog(f,jogCommands(f)[0]);
+  f.broadcast({modal:{}});
+  f.tick(50);
+  assertNear(f.grbl.jogBacklog.distance,12.7);
+  const retry=f.grbl.backlogTimer;
+  f.grbl.cancelJog();
+  assert.equal(f.grbl.jogBacklog,null);
+  f.broadcast({modal:{units:'G21'}});
+  retry();
+  f.advance(1500);
+  assert.equal(jogCommands(f).length,1);
+  assert.equal(f.grbl.jogPhase,'idle');
+  f.grbl.clearJog();
+});
+
+for(const [event,interrupt] of [
+  ['reset',f=>f.socket.receive('serialport:read','Grbl 1.1h')],
+  ['disconnect',f=>f.session.disconnect()],
+  ['program',f=>f.socket.receive('workflow:state','running')],
+]) test(`inline ${event} after G20 serialization still invalidates all ownership`,()=>{
+  const f=gatedJogFixture('delayed');
+  f.broadcast({modal:{units:'G20'}});
+  const send=f.session.jog.bind(f.session);
+  f.session.jog=wire=>{
+    const receipt=send(wire);
+    f.session.state.parserstate.modal.units='G21';
+    interrupt(f);
+    return receipt;
+  };
+  assert.equal(f.grbl.jog('X',5,254),'dropped');
+  assert.equal(jogCommands(f).at(-1)[1],'$J=G20 G91 X0.196850 F10.000000');
+  assert.equal(f.grbl.jogTarget,null);
+  assert.equal(f.grbl.jogReceipt,null);
+  assert.equal(f.grbl.jogPhase,'idle');
+  assert.equal(f.jobs.size,0);
+  assert.equal(f.motionListeners.size,0);
+});
+
+test('inline G20 rejection plus unit mutation uses the pre-send error baseline and cancels normally',()=>{
+  const f=gatedJogFixture('delayed');
+  f.broadcast({modal:{units:'G20'}});
+  const send=f.session.jog.bind(f.session), prior=f.session.errorSequence;
+  f.session.jog=wire=>{
+    const receipt=send(wire);
+    f.session.state.parserstate.modal.units='G21';
+    const [,code,context]=jogCommands(f).at(-1);
+    f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
+    f.socket.receive('serialport:read','error:15 (Travel exceeded)');
+    return receipt;
+  };
+  f.grbl.jog('X',5,254);
+  assert.ok(f.session.errorSequence>prior);
+  assert.equal(f.grbl.jogPhase,'canceling');
+  assert.equal(stopCommands(f).filter(([name])=>name==='jogCancel').length,1);
+  assert.equal(f.logs.filter(line=>/error:15.*canceling queued jogs/.test(line)).length,1);
+  assert.equal(f.motionListeners.size,1);
+  f.tick(750); assert.equal(f.grbl.jogPhase,'canceling');
+  f.tick(250); assert.equal(f.grbl.jogPhase,'idle');
+  assert.equal(f.motionListeners.size,0);
+});
+
+for(const residue of [0,0.00001]) test(`known-unit opposing detents with ${residue} mm residue leave no retry or phantom movement`,()=>{
+  const f=gatedJogFixture('delayed');
+  assert.equal(f.grbl.jog('X',1,254),'sent');
+  assert.equal(f.grbl.jog('X',0.1,254),'buffered');
+  assert.equal(f.grbl.jog('X',0.2,254),'buffered');
+  assert.equal(f.grbl.jog('X',-0.3+residue,254),'buffered');
+  assertNear(f.grbl.jogBacklog.distance,residue);
+  acknowledgeJog(f,jogCommands(f)[0]);
+  const notices=f.logs.length;
+  f.tick(50);
+  assert.equal(f.grbl.jogBacklog,null);
+  assert.equal(f.grbl.backlogTimer,null);
+  assert.equal(jogCommands(f).length,1,'Neither exact cancellation nor a zero wire word sends a jog');
+  if(residue) assert.ok(f.logs.length>notices,'A nonzero unrepresentable residue must explain its rejection');
+  else assert.equal(f.logs.length,notices,'Floating-point cancellation is not a rejected movement');
+  f.machine.x=1; f.broadcast();
+  f.advance(5000);
+  assert.equal(f.grbl.backlogTimer,null);
+  assert.equal(f.jobs.size,0);
+  assert.equal(jogCommands(f).length,1);
+  f.broadcast({modal:{units:'G20'}});
+  f.advance(5000);
+  assert.equal(jogCommands(f).length,1,'A later finer-resolution mode cannot revive discarded residue');
+  f.grbl.clearJog();
+});
+
+test('G20 backlog feed that becomes zero in G21 is rejected once without a retry loop',()=>{
+  const f=gatedJogFixture('delayed');
+  f.broadcast({modal:{units:'G20'}});
+  assert.equal(f.grbl.jog('X',25.4,254),'sent');
+  assert.equal(f.grbl.jog('X',12.7,0.0001),'buffered');
+  assertNear(f.grbl.jogBacklog.feed,0.0001);
+  f.broadcast({modal:{units:'G21'}});
+  acknowledgeJog(f,jogCommands(f)[0]);
+  const notices=f.logs.length;
+  f.tick(50);
+  assert.equal(f.grbl.jogBacklog,null);
+  assert.equal(f.grbl.backlogTimer,null);
+  assert.equal(jogCommands(f).length,1);
+  assert.ok(f.logs.length>notices,'A known-unit zero feed must explain its rejection');
+  const rejectedNotices=f.logs.length;
+  f.machine.x=25.4; f.broadcast();
+  f.advance(5000);
+  assert.equal(f.jobs.size,0);
+  assert.equal(f.logs.length,rejectedNotices,'A rejected feed cannot keep retrying');
+  f.broadcast({modal:{units:'G20'}});
+  f.advance(5000);
+  assert.equal(jogCommands(f).length,1,'Returning to representable units cannot revive rejected input');
+  f.grbl.clearJog();
 });
