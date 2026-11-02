@@ -188,14 +188,34 @@ and `npm pack` build the pinned parser automatically and include its license.
   axis's GRBL maximum rate (`$110`–`$112`). Motion is issued as one outstanding
   segment with 200 ms of travel at that feed; a 180 ms gap between wheel reports cancels
   the jog. Direction, axis, and mode changes also cancel it. New motion waits
-  for an Idle report at the commanded endpoint after each segment, or two
-  fresh Idle reports after cancellation. Both Step and Continuous request status
-  every 100 ms until completion or cancellation is confirmed. Updated CNCjs
-  position broadcasts also confirm completed endpoints. Acceleration and status latency
+  for fresh completion evidence after each segment, or two distinct fresh Idle
+  reports after cancellation. Acceleration and status latency
   can produce pauses between segments; this bounds queued travel if the
   connection drops. Very low rates whose segments fall below position/step
   resolution are refused with a log message. Browser/serial latency and GRBL
   deceleration add to stopping time.
+
+Step and Continuous observe native CNCjs motion updates while a jog is active
+or canceling. A fresh changed position at the endpoint completes the jog without
+an extra `statusreport` request; cached or parser-only state is not fresh
+evidence. Normal motion adds no status requests. When Idle evidence is
+ambiguous, the widget waits 750 ms, then requests status at 250 ms intervals,
+at most five times. After an acknowledgement, two Idle reports can confirm a
+tiny or out-and-back move; a clipped or zero-clipped move needs five. If the
+outcome is unknown after two Idle reports, the widget leaves cancellation armed
+instead of assuming completion. Fresh Jog or position progress resets the
+confirmation burst; it does not request status while motion is progressing.
+
+A trusted pending acknowledgement may wait behind a long dwell: merged detents
+and the 50 ms backlog timer are preserved, with no acknowledgement deadline or
+status queries while waiting. After acknowledgement, a three-second watchdog
+for silence while native feedback shows motion can only leave cancellation
+armed and report the missing feedback; it cannot declare the jog complete.
+Cancellation remains blocked until two distinct raw Idle reports arrive. Its
+confirmation burst also waits 750 ms; if it fails, the widget stays canceling
+and sends no further timer-driven or subscription-driven queries unless fresh
+progress arrives. Stop and feed/spindle override behavior
+are unchanged.
 
 In MPG or Continuous, moving the selector also sets the feed override to its
 percentage. GRBL's 10–200% override range clamps the 2% and 5% selections to 10%
