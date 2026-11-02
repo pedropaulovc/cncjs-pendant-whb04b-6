@@ -177,11 +177,19 @@ and `npm pack` build the pinned parser automatically and include its license.
   Leaving Lead returns to MPG.
 - **Step:** each detent moves 0.001, 0.01, 0.1, 1, 5, or 10 mm according to the
   selector. The last two positions require **5/10 mm steps → Enabled**, matching
-  LinuxCNC's opt-in big-step option. A step finishes after the wheel stops.
+  LinuxCNC's opt-in big-step option. The dial controls distance only: Step requests
+  the selected axis's full GRBL maximum rate (`$110` for X, `$111` for Y, `$112`
+  for Z), independent of program Feed %. This follows
+  [LinuxCNC's Step distance scale](https://github.com/LinuxCNC/linuxcnc/blob/master/src/hal/user_comps/xhc-whb04b-6/pendant.cc#L1397-L1434)
+  and [axis velocity limit](https://github.com/LinuxCNC/linuxcnc/blob/master/src/emc/motion/axis.c#L424-L489).
+  **Warning: Step requests full axis velocity, even at a low Feed %; verify your
+  machine's axis limits and clearance before turning the wheel.** Acceleration
+  and move length may prevent reaching that velocity. These remain cancellable
+  `$J` jogs, not `G0` commands. A step finishes after the wheel stops.
   Only one Step line waits for the controller's `ok` at a time. Detents turned
   meanwhile are merged into a single line sent when that `ok` arrives, so a fast
   wheel cannot overrun the controller's serial or planner buffers. Every detent
-  still travels its full distance: turning faster than the step feed means
+  still travels its full distance: turning faster than the axis can move means
   motion continues after the wheel stops. Stop, or changing mode or axis,
   discards merged detents that were not yet sent.
 - **Continuous:** the selector chooses 2, 5, 10, 30, 60, or 100% of the selected
@@ -230,11 +238,10 @@ confirming report. Their result follows controller feedback, not a local counter
 
 ### Settings and GRBL limits
 
-**Pendant settings** provides step feed (250 mm/min by default), spindle speed
-increment, and the large-step option. Changes are stored in browser localStorage
-under `whb04b-controls`, separately for each browser/profile and CNCjs origin.
-Step feed is capped by the selected axis's GRBL maximum rate. Jogging waits for
-controller settings instead of guessing a machine speed.
+**Pendant settings** provides spindle speed increment and the large-step option.
+Changes are stored in browser localStorage under `whb04b-controls`, separately
+for each browser/profile and CNCjs origin. Jogging waits for valid controller
+axis maximum-rate settings instead of guessing a machine speed.
 If GRBL reports an error while the pendant owns a jog, the widget logs the error,
 cancels queued jogging, and waits for two Idle reports before accepting another jog.
 

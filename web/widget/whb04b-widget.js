@@ -194,13 +194,12 @@ function wireUI() {
   macroSettings = new MacroSettings({ container: $('macroAssignments'), status: $('macroStatus'),
     refreshButton: $('refreshMacros'), onRefresh: refreshMacros, onChange: changed });
   macroSettings.setAssignments(controls.config.macros);
-  $('stepFeed').value = controls.config.stepFeed;
   $('spindleIncrement').value = controls.config.spindleIncrement;
   $('largeSteps').value = controls.config.largeSteps;
-  for (const id of ['stepFeed', 'spindleIncrement', 'largeSteps']) $(id).addEventListener('input', changed);
+  for (const id of ['spindleIncrement', 'largeSteps']) $(id).addEventListener('input', changed);
   $('saveConfig').onclick = () => {
     try {
-      const value = parseConfig({ macros: macroSettings.getAssignments(), stepFeed: Number($('stepFeed').value), spindleIncrement: Number($('spindleIncrement').value), largeSteps: $('largeSteps').value });
+      const value = parseConfig({ macros: macroSettings.getAssignments(), spindleIncrement: Number($('spindleIncrement').value), largeSteps: $('largeSteps').value });
       localStorage.setItem(CONFIG_KEY, JSON.stringify(value));
       controls.setConfig(value);
       settingsStatus.textContent = 'Settings saved for this browser and CNCjs address.';
