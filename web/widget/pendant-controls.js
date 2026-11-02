@@ -11,12 +11,11 @@ const FN = 0x0c;
 const MACROS = { 1: 11, 2: 12, 3: 13, 4: 1, 5: 2, 8: 5, 9: 6, 10: 7, 13: 9, 16: 14 };
 const LEAD = new Set([0x1c, 0x9b]);
 export const CONFIG_KEY = 'whb04b-controls';
-export const DEFAULT_CONFIG = { largeSteps: 'disabled', stepFeed: 250, spindleIncrement: 100, macros: {} };
+export const DEFAULT_CONFIG = { largeSteps: 'disabled', spindleIncrement: 100, macros: {} };
 
 export function parseConfig(value) {
-  const config = { ...DEFAULT_CONFIG, ...value };
+  const config = Object.fromEntries(Object.entries(DEFAULT_CONFIG).map(([key, fallback]) => [key, value?.[key] === undefined ? fallback : value[key]]));
   if (!['enabled', 'disabled'].includes(config.largeSteps)) throw new Error('Large steps must be enabled or disabled.');
-  if (!Number.isFinite(config.stepFeed) || config.stepFeed <= 0) throw new Error('Step feed must be positive mm/min.');
   if (!Number.isFinite(config.spindleIncrement) || config.spindleIncrement <= 0) throw new Error('Spindle increment must be positive RPM.');
   if (!config.macros || typeof config.macros !== 'object' || Array.isArray(config.macros)) throw new Error('Macros must be an object keyed by macro number.');
   const allowed = new Set(Object.values(MACROS).map(String));
@@ -114,7 +113,9 @@ export class PendantControls {
     const axis = AXES[this.axisCode];
     if (this.mode === 'step') {
       if (selection.step > 1 && this.config.largeSteps !== 'enabled') { this.log('5/10 mm steps are disabled; enable them in pendant settings if required.'); return; }
-      this.grbl.jog(axis, report.jog * selection.step, this.config.stepFeed);
+      const max = this.grbl.maxRate(axis);
+      if (!max) { this.log(`Step: waiting for GRBL ${axis} maximum-rate setting.`); return; }
+      this.grbl.jog(axis, report.jog * selection.step, max);
       return;
     }
     if (this.mode !== 'continuous') return;

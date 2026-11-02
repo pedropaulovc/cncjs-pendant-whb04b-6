@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [3.2.5] - 2026-11-02
+
+### Fixed
+
+- Step jogging now requests the selected XYZ axis's full GRBL maximum rate (`$110`/`$111`/`$112`), following LinuxCNC's distance-only Step selector behavior. Program feed override does not reduce Step speed; acceleration and travel length still limit actual velocity. Missing or invalid axis limits refuse motion. Step distances, large-step opt-in, Continuous, overrides, and `$J` cancellation are unchanged.
+- Removed the separate Step feed setting and its UI. Loading and saving pendant configuration drops obsolete fields without resetting spindle increment, large-step preference, or macro assignments.
+
 ## [3.2.4] - 2026-11-02
 
 ### Fixed

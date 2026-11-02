@@ -43,7 +43,7 @@ test('startup Step is idle until input and the first detent jogs the selected di
   assert.deepEqual(f.commands, []);
   f.input({ rightDialCode: 0x0e, jog: -1 });
   assert.equal(f.controls.mode, 'step');
-  assert.deepEqual(f.commands, [['gcode', '$J=G21 G91 X-0.0100 F250.000']]);
+  assert.deepEqual(f.commands, [['gcode', '$J=G21 G91 X-0.0100 F3000.000']]);
   assert.equal(f.grbl.pendingOverrides.size, 0);
 });
 
@@ -119,7 +119,7 @@ test('selector changes in MPG set feed percentages and clamp to the minimum', ()
 
 test('Step counts exact millimetres; large steps opt in; unknown selectors and ABC never move', () => {
   const f = fixture(); f.press(0x0f); f.input({ rightDialCode: 0x0e, jog: 4 });
-  assert.deepEqual(f.commands.at(-1), ['gcode', '$J=G21 G91 X0.0400 F250.000']);
+  assert.deepEqual(f.commands.at(-1), ['gcode', '$J=G21 G91 X0.0400 F3000.000']);
   f.session.reportSequence+=2; f.session.activeState='Idle'; f.session.positionReport={...f.session.positionReport,values:[0.04,0,0],sequence:f.session.reportSequence};
   f.input({ rightDialCode: 0x1b, jog: 1 });
   assert.equal(f.commands.filter(([c]) => c === 'gcode').length, 1);
@@ -127,6 +127,85 @@ test('Step counts exact millimetres; large steps opt in; unknown selectors and A
   f.input({ jog: 1 }); assert.match(f.commands.at(-1)[1], /X10.0000/);
   for (const report of [{ leftDialCode: 0x14 }, { leftDialCode: 0x15 }, { leftDialCode: 0x16 }, { leftDialCode: 0x06 }, { leftDialCode: 0x11, rightDialCode: 0xff }]) f.input({ ...report, jog: 1 });
   assert.equal(f.commands.filter(([c]) => c === 'gcode').length, 2);
+});
+
+test('Step selects each axis maximum rate independently of program Feed % and distance selector', () => {
+  for (const [leftDialCode, axis, setting, max] of [
+    [0x11, 'X', '$110', '4321'], [0x12, 'Y', '$111', '2345'], [0x13, 'Z', '$112', '678'],
+  ]) {
+    for (const feedOverride of [20, 100, 175]) {
+      for (const [rightDialCode, distance] of [[0x0e, '0.0300'], [0x10, '3.0000']]) {
+        const f = fixture();
+        f.session.settings.settings[setting] = max;
+        f.session.overrides[0] = feedOverride;
+        f.input({ leftDialCode, rightDialCode, jog: 3 });
+        assert.deepEqual(f.commands, [['gcode', `$J=G21 G91 ${axis}${distance} F${max}.000`]]);
+        assert.equal(f.grbl.pendingOverrides.size, 0);
+      }
+    }
+  }
+});
+
+test('the next Step uses the latest maximum-rate setting for the same axis', () => {
+  for (const [leftDialCode, axis, setting, index] of [
+    [0x11, 'X', '$110', 0], [0x12, 'Y', '$111', 1], [0x13, 'Z', '$112', 2],
+  ]) {
+    const f = fixture();
+    f.session.settings.settings[setting] = '1234';
+    f.input({ leftDialCode, jog: 1 });
+    assert.deepEqual(f.commands.at(-1), ['gcode', `$J=G21 G91 ${axis}0.1000 F1234.000`]);
+    const values = [0, 0, 0]; values[index] = 0.1;
+    f.session.reportSequence++;
+    f.session.positionReport = { ...f.session.positionReport, values, sequence: f.session.reportSequence };
+    f.notify(true);
+    f.session.settings.settings[setting] = '567';
+    f.input({ jog: -2 });
+    assert.deepEqual(f.commands.filter(([command]) => command === 'gcode'), [
+      ['gcode', `$J=G21 G91 ${axis}0.1000 F1234.000`],
+      ['gcode', `$J=G21 G91 ${axis}-0.2000 F567.000`],
+    ]);
+  }
+});
+
+test('Step refuses missing or invalid selected-axis limits rather than guessing a feed', () => {
+  for (const [leftDialCode, axis, setting] of [[0x11, 'X', '$110'], [0x12, 'Y', '$111'], [0x13, 'Z', '$112']]) {
+    for (const value of [undefined, null, '', '0', '-1', 'invalid', 'Infinity', NaN]) {
+      const f = fixture();
+      if (value === undefined) delete f.session.settings.settings[setting];
+      else f.session.settings.settings[setting] = value;
+      f.input({ leftDialCode, jog: 1 });
+      assert.deepEqual(f.commands, []);
+      assert.equal(f.logs.at(-1), `Step: waiting for GRBL ${axis} maximum-rate setting.`);
+      f.session.settings.settings[setting] = '876';
+      f.input({ jog: 1 });
+      assert.deepEqual(f.commands, [['gcode', `$J=G21 G91 ${axis}0.1000 F876.000`]]);
+    }
+  }
+});
+
+test('legacy Step feed is ignored and excluded from saved config without losing other settings', () => {
+  for (const stepFeed of [0, 17, 99999, 'invalid']) {
+    const f = fixture();
+    const settings = { largeSteps: 'enabled', spindleIncrement: 321,
+      macros: { 1: 'M3', 2: { source: 'cncjs', id: 'saved', name: 'Saved macro' } } };
+    const stored = JSON.stringify({ ...settings, stepFeed });
+    f.controls.setConfig(parseConfig(JSON.parse(stored)));
+    const saved = JSON.parse(JSON.stringify(f.controls.config));
+    assert.deepEqual(saved, settings);
+    assert.equal(Object.hasOwn(saved, 'stepFeed'), false);
+    f.controls.setConfig(parseConfig(saved));
+    f.input({ leftDialCode: 0x13, rightDialCode: 0x1a, jog: -1 });
+    assert.deepEqual(f.commands, [['gcode', '$J=G21 G91 Z-5.0000 F1000.000']]);
+    f.grbl.clearJog();
+    f.press(6, 0x0c);
+    assert.deepEqual(f.commands.at(-1), ['gcode', 'S821']);
+    f.press(4, 0x0c);
+    assert.deepEqual(f.commands.at(-1), ['gcode', ['M3']]);
+    const selected = [];
+    f.controls.onSavedMacro = id => selected.push(id);
+    f.press(5, 0x0c);
+    assert.deepEqual(selected, ['saved']);
+  }
 });
 
 test('Continuous uses axis max-rate percentage, bounds pulses, cancels after silence, and waits for fresh Idle', () => {
@@ -192,7 +271,7 @@ test('manual controls refuse a running program and unknown spindle state; cooldo
 });
 
 test('invalid configuration fails without accepting arbitrary macro keys', () => {
-  for (const value of [{largeSteps:true},{stepFeed:0},{spindleIncrement:NaN},{macros:[]},{macros:{3:'M3'}},{macros:{1:()=>{}}}]) assert.throws(()=>parseConfig(value));
+  for (const value of [{largeSteps:true},{spindleIncrement:NaN},{macros:[]},{macros:{3:'M3'}},{macros:{1:()=>{}}}]) assert.throws(()=>parseConfig(value));
 });
 
 test('configured custom macros refuse unavailable bounds while ordinary commands still run', () => {
