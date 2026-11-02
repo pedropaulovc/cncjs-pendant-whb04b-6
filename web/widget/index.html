@@ -39,11 +39,22 @@
   .settings-status:empty { margin: 0; }
   .settings-status[data-state="error"] { color: #a94442; }
   .settings-status[data-state="warning"] { color: #8a6d3b; }
-  #macroSettings > :is(.settings-help, .settings-status) { margin: 4px 0; }
+  #macroSettings > :is(.settings-help, .settings-status), #pendantSettings > .settings-help { margin: 4px 0; }
   #macroAssignments { display: grid; gap: 6px; margin: 8px 0; }
   .macro-assignment { min-width: 0; margin: 0; padding: 6px; border: 1px solid #ddd; border-radius: 3px; }
   .macro-assignment legend { padding: 0 4px; font-size: 12px; font-weight: 600; }
-  .macro-slot { margin-left: 6px; font-size: 11px; font-weight: 400; color: #666; }
+  .help-toggle { position: relative; width: 16px; height: 16px; min-height: 0; margin: -2px 0 -2px 3px; padding: 0; border-radius: 50%; font: italic 700 11px/14px Georgia, serif; color: #337ab7; vertical-align: middle; }
+  .help-toggle::after { content: ""; position: absolute; inset: -4px; }
+  .help-panel { margin: 0 0 5px; padding: 5px 6px; font-size: 12px; background: #fcf8e3; border: 1px solid #faebcc; border-radius: 3px; overflow-wrap: anywhere; }
+  .help-panel dl, .help-panel p, .button-reference { margin: 0; }
+  .help-panel dt, .button-reference dt { font-weight: 600; }
+  .help-panel dt span { font-weight: 400; color: #666; }
+  .help-panel dd, .button-reference dd { margin: 0 0 4px 8px; }
+  .help-panel p { margin-top: 4px; }
+  #buttonReference { margin: 6px 0; font-size: 12px; }
+  #buttonReference > p { margin: 4px 0; }
+  .button-reference dd + dd { margin-top: -3px; }
+  code { font-size: 11px; overflow-wrap: anywhere; }
   .macro-choice { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px; align-items: center; font-size: 12px; }
   .macro-choice select { min-width: 0; width: 100%; }
   .macro-add { align-items: end; }
@@ -68,27 +79,40 @@
   </div>
   <div class="row">
     <button id="connect" type="button">Connect pendant</button>
-    <button id="reconnectSock" type="button">Re-read creds &amp; connect</button>
   </div>
   <dl class="readout" aria-label="Pendant operating readout">
-    <div><dt>Mode</dt><dd id="mode">step</dd></div>
+    <div><dt>Mode<button id="modeHelpToggle" class="help-toggle" type="button" aria-label="Mode help" aria-controls="modeHelp" aria-expanded="false">i</button></dt><dd id="mode">step</dd></div>
     <div><dt>Axis</dt><dd id="ld">—</dd></div>
     <div><dt>Rate / step</dt><dd id="rd">—</dd></div>
     <div><dt>Wheel</dt><dd id="jog">0</dd></div>
   </dl>
+  <div id="modeHelp" class="help-panel" role="region" aria-label="Mode help" hidden>
+    <dl>
+      <dt>Step <span>— press Step; active on load</span></dt>
+      <dd>Each wheel detent moves the Axis-dial axis by the right-dial value (0.001–10) in the active unit: inches under G20, millimetres under G21, so 0.1 is 2.54 mm under G20. Moves at the axis's full <code>$110</code>–<code>$112</code> rate; Feed % does not slow it. 5 and 10 need <b>5/10 steps</b> in Pendant settings. Waits for a known G20/G21 mode.</dd>
+      <dt>Continuous <span>— press Continuous</span></dt>
+      <dd>Jogs while the wheel turns, at the right-dial 2–100% of the axis maximum rate. A 180 ms pause in wheel reports cancels the jog. Same physical speed under G20 or G21.</dd>
+      <dt>MPG <span>— turn the right dial to Lead, then back to a % position</span></dt>
+      <dd>Each detent changes program feed override by 1% (10–200%). Never moves an axis. Press Step or Continuous to leave.</dd>
+    </dl>
+    <p><b>Lead</b> is a right-dial position, not a jog mode: each detent changes spindle override by 1% and never moves an axis. Leaving Lead selects MPG.</p>
+    <p>In MPG and Continuous, turning the right dial also sets feed override to its percentage (2% and 5% become GRBL's 10% minimum). Axis Off or A/B/C never jogs. Fn+Continuous and Fn+Step toggle coolant instead of changing mode.</p>
+  </div>
   <p id="operationStatus" role="status" aria-live="polite"></p>
   <div class="panels">
     <details id="pendantSettings">
       <summary>Pendant settings</summary>
       <div class="row">
-        <label class="field">Probe plate mm<input id="thickness" type="number" step="0.01" value="20" /></label>
+        <label class="field">Probe plate mm<input id="thickness" type="number" min="0" step="0.01" value="20" /></label>
         <label class="field">Spindle increment (RPM)<input id="spindleIncrement" type="number" min="1" value="100" /></label>
-        <label class="field"><span id="largeStepsLabel">5/10 steps (waiting for G20/G21)</span><select id="largeSteps"><option value="disabled">Disabled</option><option value="enabled">Enabled</option></select></label>
+        <label class="field"><span id="largeStepsLabel">5/10 steps (waiting for G20/G21)</span><select id="largeSteps" aria-describedby="largeStepsHelp"><option value="disabled">Disabled</option><option value="enabled">Enabled</option></select></label>
       </div>
+      <p id="largeStepsHelp" class="settings-help">Step mode only. Right-dial 5 and 10 move 5 or 10 of the active unit per detent at the axis's full <code>$110</code>–<code>$112</code> rate: 5/10 mm under G21, 127/254 mm under G20. Continuous, MPG, and Lead ignore this setting. Selector 1 is always allowed: 1 in (25.4 mm) per detent under G20.</p>
+      <p class="settings-help">Changes save automatically. Probe plate thickness is always millimetres, even under G20.</p>
     </details>
     <details id="macroSettings">
       <summary>Macro buttons</summary>
-      <p class="settings-help">Add a button, then choose its macro.</p>
+      <p class="settings-help">Add a combination, then choose its action. Changes save automatically.</p>
       <div class="row macro-add">
         <label class="field" for="macroButtonToAdd">Unused Fn combination<select id="macroButtonToAdd"></select></label>
         <button id="addMacro" type="button">Add macro button</button>
@@ -97,15 +121,34 @@
       <div id="macroAssignments"></div>
       <button id="refreshMacros" type="button">Refresh CNCjs macros</button>
       <p id="macroStatus" class="settings-status" role="status" aria-live="polite"></p>
+      <details id="buttonReference">
+        <summary>Default button reference</summary>
+        <p>Read-only built-in behavior. Hold Fn first, then the other key.</p>
+        <dl class="button-reference">
+          <dt>Reset</dt><dd><b>Press:</b> GRBL soft reset; drops pending overrides and pendant jogs.</dd><dd><b>Fn:</b> Fn+Reset macro (no printed number).</dd>
+          <dt>Stop</dt><dd><b>Press:</b> cancels jogs and queued commands; holds a running program, then resets after motion stops.</dd><dd><b>Fn:</b> Fn+Stop macro.</dd>
+          <dt>Start/Pause</dt><dd><b>Press:</b> starts the loaded CNCjs program when idle, pauses it while running, resumes it when paused, or cycle-starts a GRBL Hold.</dd><dd><b>Fn:</b> Fn+Start/Pause macro.</dd>
+          <dt>Feed+ / Feed-</dt><dd><b>Press:</b> feed override +1% / −1% (10–200%), also during a program.</dd><dd><b>Fn:</b> Macro-1 / Macro-2.</dd>
+          <dt>Spindle+ / Spindle-</dt><dd><b>Press:</b> spindle override +1% / −1% (10–200%), also during a program.</dd><dd><b>Fn (printed Macro-3 / Macro-4):</b> programmed S speed ± Spindle increment, limited by <code>$30</code>/<code>$31</code>; idle only.</dd>
+          <dt>M-Home</dt><dd><b>Press:</b> GRBL homing (<code>$H</code>); idle or Alarm only.</dd><dd><b>Fn:</b> Macro-5.</dd>
+          <dt>Safe-Z</dt><dd><b>Press:</b> <code>G21 G53 G0 G90 Z-5</code> (rapid to machine Z −5 mm).</dd><dd><b>Fn:</b> Macro-6.</dd>
+          <dt>W-Home</dt><dd><b>Press:</b> <code>G21 G53 G0 G90 Z-5</code>, then <code>G21 G54 G0 G90 X0 Y0</code>; Z stays at machine −5 mm.</dd><dd><b>Fn:</b> Macro-7.</dd>
+          <dt>S on/off</dt><dd><b>Press:</b> <code>M5</code> if the spindle runs; otherwise <code>M3</code> (or <code>M4</code> after Fn+S on/off) when S is positive.</dd><dd><b>Fn (printed Macro-8):</b> switches the next start between <code>M3</code> and <code>M4</code>; spindle must be stopped.</dd>
+          <dt>Probe-Z</dt><dd><b>Press:</b> <code>G21 G91</code>, <code>G38.2 Z-50 F120</code>, <code>G10 L20 P1 Z</code>(Probe plate mm + 0.001), <code>G0 Z3</code>, <code>G90</code>.</dd><dd><b>Fn:</b> Macro-9.</dd>
+          <dt>Continuous</dt><dd><b>Press:</b> Continuous mode.</dd><dd><b>Fn:</b> flood coolant toggle: <code>M8</code>; off sends <code>M9</code>, then <code>M7</code> if mist stays on.</dd>
+          <dt>Step</dt><dd><b>Press:</b> Step mode.</dd><dd><b>Fn:</b> mist coolant toggle: <code>M7</code>; off sends <code>M9</code>, then <code>M8</code> if flood stays on.</dd>
+          <dt>Macro-10</dt><dd><b>Press:</b> toggles the pendant LCD between work (X1/Y1/Z1) and machine (X/Y/Z) coordinates; sends nothing to the controller.</dd><dd><b>Fn:</b> Macro-10 macro; unassigned by default.</dd>
+          <dt>Fn</dt><dd>Modifier only.</dd>
+        </dl>
+        <p>An unassigned macro combination only logs that it is not configured; a Disabled one logs that it is disabled. Macros, homing, spindle, and coolant commands need an idle controller with no running program. Safe-Z, W-Home, and Probe-Z select G21 and leave the controller in millimetres; W-Home also leaves G54 active, and Probe-Z always sets the G54 Z offset.</p>
+      </details>
     </details>
     <details>
       <summary>Diagnostics</summary>
+      <div class="row"><button id="reconnectSock" type="button">Re-read creds &amp; connect</button></div>
       <p class="raw-keys">Raw keys: <span id="k1">—</span> / <span id="k2">—</span></p>
       <pre id="log" aria-label="Pendant diagnostic log" tabindex="0"></pre>
     </details>
-  </div>
-  <div id="settingsActions" class="row" hidden>
-    <button id="saveConfig" type="button">Save settings</button>
   </div>
   <p id="settingsStatus" class="settings-status" role="status" aria-live="polite"></p>
   <script type="module" src="./whb04b-widget.js"></script>

@@ -72,12 +72,18 @@ machine coordinates to the pendant LCD.
 
 The compact operating view uses CNCjs-like light controls, with connection status
 and one readout for mode, selected axis, rate/step selector, and wheel delta.
+The pendant pill is always shown; the socket, token, and port pills appear only
+while something is wrong. The **i** button beside **Mode** explains Step,
+Continuous, MPG, and the Lead dial position: hover or focus previews it, a click
+keeps it open, and a second click or Escape closes it. The help opens in the page
+flow below the readout, so narrow widget columns do not clip it.
 **Pendant settings** holds probe plate thickness, spindle increment, and large steps.
-**Macro buttons** is a separate top-level panel. **Diagnostics** holds raw keys
-and a scroll-bounded log; all three panels start collapsed. The latest log message also appears in the live
-status line, so connection, jogging, and LCD errors are visible without opening
-Diagnostics. **Re-read creds & connect** retries the CNCjs session using the
-parent frame's credentials. The layout wraps to fit narrow widget columns.
+**Macro buttons** is a separate top-level panel. **Diagnostics** holds
+**Re-read creds & connect** (retries the CNCjs session using the parent frame's
+credentials), raw keys, and a scroll-bounded log; all three panels start
+collapsed. The latest log message also appears in the live status line, so
+connection, jogging, and LCD errors are visible without opening Diagnostics.
+The layout wraps to fit narrow widget columns.
 
 The LCD shows work coordinates (`X1/Y1/Z1`) by default; Macro-10 switches to
 machine coordinates (`X/Y/Z`). Numeric values follow the controller's active
@@ -146,27 +152,37 @@ Hold **Fn first**, then the other key. Each press executes once; holding a key
 while wheel reports arrive does not repeat it. Fn combinations work with either
 key-byte order reported by the receiver.
 
-The remaining Fn combinations run operator-configured G-code macros:
+The remaining Fn combinations run operator-configured G-code macros. The widget
+labels them with the macro number printed on each key; Reset, Stop, and
+Start/Pause print none. Fn + Spindle + / - and Fn + S on/off (printed Macro-3,
+Macro-4, and Macro-8) keep the built-in spindle functions above and cannot be
+assigned. The stored slot numbers follow LinuxCNC and are unchanged:
 
-| Fn + button | Macro slot |
-|-------------|------------|
-| Feed + / Feed - | 1 / 2 |
-| M-Home / Safe-Z / W-Home | 5 / 6 / 7 |
-| Probe-Z | 9 |
-| Reset / Stop / Start-Pause | 11 / 12 / 13 |
-| Macro-10 | 14 |
+| Label | Stored slot |
+|-------|-------------|
+| Macro-1 (Fn+Feed+) / Macro-2 (Fn+Feed-) | 1 / 2 |
+| Macro-5 (Fn+M-Home) / Macro-6 (Fn+Safe-Z) / Macro-7 (Fn+W-Home) | 5 / 6 / 7 |
+| Macro-9 (Fn+Probe-Z) | 9 |
+| Macro-10 (Fn+Macro-10) | 14 |
+| Fn+Reset / Fn+Stop / Fn+Start/Pause | 11 / 12 / 13 |
 
-Configure these under **Macro buttons**. Only configured assignments are listed
-initially. Choose an **Unused Fn combination** and click **Add macro button**
-to add one row at a time; combinations already listed cannot be added twice.
-Each row can be disabled, assigned multiline custom G-code, or linked to a saved
-CNCjs macro. **Remove macro** removes that row from the pending assignments.
-Click the shared **Save settings** button to apply both pendant settings and macro
-assignments in this browser; removed, disabled, and empty custom assignments are
-omitted from the saved configuration. This button is available whenever either
-configuration panel is open or there are unsaved changes. Closing panels does not
-discard edits or hide the unsaved status. An unconfigured macro only logs its slot
-number. Bare Reset and Stop retain their normal behavior.
+Configure these under **Macro buttons**. Only assigned combinations are listed.
+Choose an **Unused Fn combination** and click **Add macro button** to add one row
+at a time; combinations already listed cannot be added twice. A new row starts
+**Disabled**. Each row can stay disabled, hold multiline custom G-code, or link to
+a saved CNCjs macro. **Remove macro** removes the row. **Default button
+reference**, collapsed inside **Macro buttons**, is a read-only summary of every
+built-in button action and the G-code it sends.
+
+Every change saves immediately in this browser; there is no Save button. A
+Disabled row is saved as `{ "source": "disabled" }` and stays listed after a
+reload; pressing it only logs that it is disabled. A removed row is deleted from
+the saved configuration, and pressing an unassigned combination only logs that
+it is not configured, for example `Macro-6 (Fn+Safe-Z) is not configured.` Custom
+G-code that is empty or fails validation is not saved: the row shows why, and the
+status line below the panels shows `Not saved:` until it is fixed or the row is
+removed; the last valid configuration stays in effect. Bare Reset and Stop retain
+their normal behavior.
 
 Saved macros come from the same CNCjs Macro widget and remain linked by ID. The
 list refreshes when CNCjs settings change; **Refresh CNCjs macros** reloads it
@@ -202,8 +218,10 @@ and `npm pack` build the pinned parser automatically and include its license.
   per detent without the opt-in. The last two positions, 5 and 10 (the large
   steps), require **5/10 steps → Enabled** in either unit: the opt-in tests the
   numeric selector, not physical distance; under G20 those detents are 5 in
-  (127 mm) and 10 in (254 mm). The pendant labels them `5/10 in steps` or
-  `5/10 mm steps`, matching LinuxCNC's opt-in big-step option. The dial controls
+  (127 mm) and 10 in (254 mm). The pendant labels them `5/10 in steps (127/254 mm)`
+  or `5/10 mm steps`, matching LinuxCNC's opt-in big-step option (`-B`). The
+  option stays opt-in because Step runs at full axis velocity, and it affects Step
+  only: Continuous, MPG, and Lead ignore it. The dial controls
   distance only: Step requests
   the selected axis's full GRBL maximum rate (`$110` for X, `$111` for Y, `$112`
   for Z), independent of program Feed %. This follows
@@ -278,10 +296,13 @@ confirming report. Their result follows controller feedback, not a local counter
 ### Settings and GRBL limits
 
 **Pendant settings** provides probe plate thickness, spindle speed increment, and
-the large-step option. **Save settings** stores spindle increment, large steps,
-and macro assignments in browser localStorage under `whb04b-controls`, separately
-for each browser/profile and CNCjs origin. Probe plate thickness applies directly
-to probing and resets to 20 mm on reload. Jogging waits for valid controller axis
+the large-step option. Probe plate thickness (millimetres, 20 by default),
+spindle increment, large steps, and macro assignments save automatically in
+browser localStorage under `whb04b-controls`, separately for each browser/profile
+and CNCjs origin, and are restored on reload. An invalid value, such as an empty
+or negative probe plate thickness or an empty spindle increment, is reported and
+not saved; while the probe plate field is invalid, Probe-Z refuses to probe rather
+than use the saved value. Jogging waits for valid controller axis
 maximum-rate settings and a known G20/G21 mode instead of guessing a machine
 speed or unit.
 If GRBL reports an error while the pendant owns a jog, the widget logs the error,

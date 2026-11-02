@@ -24,6 +24,7 @@ import { Grbl } from './grbl.js';
 import { PendantControls, CONFIG_KEY, parseConfig } from './pendant-controls.js';
 import { controllerDisplayFrame } from './pendant-display.js';
 import { MacroSettings } from './macro-settings.js';
+import { wireHelpToggle } from './help-toggle.js';
 import { CncjsMacros } from './cncjs-macros.js';
 import { SavedMacroRunner } from './macro-runner.js';
 
@@ -96,10 +97,12 @@ function log(m) {
   el.textContent += `[${new Date().toLocaleTimeString()}] ${m}\n`;
   el.scrollTop = el.scrollHeight;
 }
+// Connection pills show faults only; the pendant pill always stays visible.
 function setPill(id, on, text) {
   const el = $(id);
   el.textContent = text;
   el.className = 'pill ' + (on ? 'ok' : 'bad');
+  el.hidden = on && id !== 'hidPill';
 }
 
 //---------------------------------------------------------------------------
@@ -120,6 +123,7 @@ const session = new CncjsSession({
   onState: onControllerState,
   onConfig: refreshMacros,
 });
+// Probing reads the live field: an empty or negative draft refuses Probe-Z.
 const grbl = new Grbl(session, () => $('thickness')?.valueAsNumber ?? NaN, log);
 const savedMacroRunner = new SavedMacroRunner({ session, grbl, library: macroLibrary, log });
 const controls = new PendantControls(grbl, {
@@ -195,36 +199,35 @@ function wireUI() {
   $('reconnectSock').onclick = () => { readParentStore(); refreshCtxUI(); connectSocket(); };
   try { controls.setConfig(parseConfig(JSON.parse(localStorage.getItem(CONFIG_KEY) || '{}'))); }
   catch (error) { log(`Pendant settings: ${error.message}`); }
+  wireHelpToggle($('modeHelpToggle'), $('modeHelp'));
   const settingsStatus = $('settingsStatus');
-  let dirty = false;
-  const updateSettingsActions = () => {
-    $('settingsActions').hidden = !dirty && !$('pendantSettings').open && !$('macroSettings').open;
+  // Every edit saves at once. An invalid draft stays on screen with its error
+  // but never replaces the last valid saved configuration.
+  const save = () => {
+    try {
+      // valueAsNumber keeps an empty field NaN (rejected) instead of Number('') = 0.
+      const value = parseConfig({ macros: macroSettings.getAssignments(), spindleIncrement: $('spindleIncrement').valueAsNumber,
+        probeThickness: $('thickness').valueAsNumber, largeSteps: $('largeSteps').value });
+      // Another widget may already have stored this value; only the storage
+      // write is skipped then. This widget's runtime always takes the value.
+      const serialized = JSON.stringify(value);
+      if (serialized !== localStorage.getItem(CONFIG_KEY)) localStorage.setItem(CONFIG_KEY, serialized);
+      controls.setConfig(value);
+      settingsStatus.dataset.state = 'saved';
+      settingsStatus.textContent = 'Settings saved automatically for this browser and CNCjs address.';
+    } catch (error) {
+      settingsStatus.dataset.state = 'error';
+      settingsStatus.textContent = `Not saved: ${error.message}`;
+    }
   };
-  const changed = () => {
-    dirty = true;
-    settingsStatus.textContent = 'Unsaved changes.';
-    updateSettingsActions();
-  };
-  for (const id of ['pendantSettings', 'macroSettings']) $(id).addEventListener('toggle', updateSettingsActions);
   macroSettings = new MacroSettings({ container: $('macroAssignments'), status: $('macroStatus'),
     refreshButton: $('refreshMacros'), addSelect: $('macroButtonToAdd'), addButton: $('addMacro'),
-    emptyState: $('macroEmpty'), onRefresh: refreshMacros, onChange: changed });
+    emptyState: $('macroEmpty'), onRefresh: refreshMacros, onChange: save });
   macroSettings.setAssignments(controls.config.macros);
   $('spindleIncrement').value = controls.config.spindleIncrement;
+  $('thickness').value = controls.config.probeThickness;
   $('largeSteps').value = controls.config.largeSteps;
-  for (const id of ['spindleIncrement', 'largeSteps']) $(id).addEventListener('input', changed);
-  $('saveConfig').onclick = () => {
-    try {
-      const value = parseConfig({ macros: macroSettings.getAssignments(), spindleIncrement: Number($('spindleIncrement').value), largeSteps: $('largeSteps').value });
-      localStorage.setItem(CONFIG_KEY, JSON.stringify(value));
-      controls.setConfig(value);
-      macroSettings.setAssignments(value.macros);
-      dirty = false;
-      updateSettingsActions();
-      settingsStatus.textContent = 'Settings saved for this browser and CNCjs address.';
-      log('Pendant settings saved for this browser and CNCjs address.');
-    } catch (error) { settingsStatus.textContent = error.message; log(`Pendant settings: ${error.message}`); }
-  };
+  for (const id of ['spindleIncrement', 'thickness', 'largeSteps']) $(id).addEventListener('input', save);
 }
 
 function boot() {

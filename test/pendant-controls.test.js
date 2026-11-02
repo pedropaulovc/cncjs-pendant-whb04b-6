@@ -222,7 +222,7 @@ test('readout follows program units and known mode without presenting Step as a 
   f.input({ rightDialCode: 0x0f });
   assert.deepEqual(f.controls.readout, { mode: 'step (mm)', rate: '0.1 mm', largeSteps: '5/10 mm steps' });
   f.session.state.parserstate.modal.units = 'G20';
-  assert.deepEqual(f.controls.readout, { mode: 'step (in)', rate: '0.1 in', largeSteps: '5/10 in steps' });
+  assert.deepEqual(f.controls.readout, { mode: 'step (in)', rate: '0.1 in', largeSteps: '5/10 in steps (127/254 mm)' });
   f.session.state.parserstate.modal.units = undefined;
   assert.deepEqual(f.controls.readout, {
     mode: 'step (waiting for G20/G21)', rate: '0.1 (waiting for G20/G21)', largeSteps: '5/10 steps (waiting for G20/G21)',
@@ -282,7 +282,7 @@ test('Step refuses missing or invalid selected-axis limits rather than guessing 
 test('legacy Step feed is ignored and excluded from saved config without losing other settings', () => {
   for (const stepFeed of [0, 17, 99999, 'invalid']) {
     const f = fixture();
-    const settings = { largeSteps: 'enabled', spindleIncrement: 321,
+    const settings = { largeSteps: 'enabled', spindleIncrement: 321, probeThickness: 12.5,
       macros: { 1: 'M3', 2: { source: 'cncjs', id: 'saved', name: 'Saved macro' } } };
     const stored = JSON.stringify({ ...settings, stepFeed });
     f.controls.setConfig(parseConfig(JSON.parse(stored)));
@@ -347,7 +347,23 @@ test('Fn uses macros, spindle RPM/direction, coolant, and Macro10 toggles coordi
   f.press(15,0x0c); assert.deepEqual(f.commands.at(-1),['gcode','M7']);
   f.press(16); assert.equal(f.controls.coordinates,'machine');
   f.press(16); assert.equal(f.controls.coordinates,'work');
-  f.press(9,0x0c); assert.match(f.logs.at(-1),/Macro 6 is not configured/);
+  f.press(9,0x0c); assert.match(f.logs.at(-1),/Macro-6 \(Fn\+Safe-Z\) is not configured/);
+});
+
+test('explicitly disabled macros persist and never run, distinct from missing assignments, under unchanged slot IDs', () => {
+  const f = fixture(), selected = [];
+  f.controls.onSavedMacro = id => selected.push(id);
+  const config = parseConfig(JSON.parse(JSON.stringify({ macros: { 14: { source: 'disabled' }, 11: 'G0 X0' } })));
+  assert.deepEqual(config.macros, { 11: 'G0 X0', 14: { source: 'disabled' } });
+  f.controls.setConfig(config);
+  f.press(16, 0x0c);
+  assert.deepEqual(f.commands, []);
+  assert.match(f.logs.at(-1), /Macro-10 \(Fn\+Macro-10\) is disabled/);
+  f.press(2, 0x0c);
+  assert.match(f.logs.at(-1), /Fn\+Stop is not configured/);
+  f.press(1, 0x0c);
+  assert.deepEqual(f.commands, [['gcode', ['G0 X0']]]);
+  assert.deepEqual(selected, []);
 });
 
 test('Start/Pause uses CNCjs sender start/pause/resume; Stop still cancels', () => {
@@ -367,7 +383,9 @@ test('manual controls refuse a running program and unknown spindle state; cooldo
 });
 
 test('invalid configuration fails without accepting arbitrary macro keys', () => {
-  for (const value of [{largeSteps:true},{spindleIncrement:NaN},{macros:[]},{macros:{3:'M3'}},{macros:{1:()=>{}}}]) assert.throws(()=>parseConfig(value));
+  for (const value of [{largeSteps:true},{spindleIncrement:NaN},{probeThickness:NaN},{probeThickness:-1},{probeThickness:null},{probeThickness:'20'},{macros:[]},{macros:{3:'M3'}},{macros:{1:()=>{}}}]) assert.throws(()=>parseConfig(value));
+  assert.equal(parseConfig({}).probeThickness, 20);
+  assert.equal(parseConfig({ probeThickness: 0 }).probeThickness, 0);
 });
 
 test('configured custom macros refuse unavailable bounds while ordinary commands still run', () => {
