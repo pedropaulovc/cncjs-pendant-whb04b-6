@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## [3.2.7] - 2026-11-02
+
+### Changed
+
+- Step jogging follows the controller's active G20/G21 units instead of always sending millimetres: inches under G20 and millimetres under G21. The same selector travels 25.4 times farther under G20, so 0.1 is 2.54 mm under G20 and 0.1 mm under G21. Selector 1 needs no opt-in in either unit, so under G20 it moves 1 in (25.4 mm). Selectors 5 and 10 still need **5/10 steps → Enabled** in either unit, because the opt-in tests the numeric selector. Readouts and the opt-in label show the active unit.
+- Continuous keeps its physical speed and 200 ms segment in either unit. Only its `$J` line changes: it is written in inches and in/min under G20. Previously every `$J` line was G21, even while the controller was in G20.
+- Step and Continuous wait for a known G20/G21 state. While it is unknown, readouts show `waiting for G20/G21`, Step ignores new wheel input, and Continuous refuses to jog. Only an unknown state retains merged Step detents, in millimetres, until a mode is known. A known G20/G21 switch does not reinterpret them. If the active mode cannot write their distance or feed, they are discarded with a log message rather than retried. Stop, mode changes, and axis changes still discard them.
+- The low-level jog helper still takes millimetres and mm/min. `$13` report units still affect only LCD and position conversion, never jog units.
+- Safe-Z, W-Home, Probe-Z, and the probe plate thickness remain millimetres by design. Those macros select G21 and leave the controller in G21, so later Step and Continuous jogs use millimetres until G20 is commanded again.
+
 ## [3.2.6] - 2026-11-02
 
 ### Changed

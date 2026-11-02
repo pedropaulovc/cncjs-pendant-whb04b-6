@@ -126,13 +126,16 @@ const controls = new PendantControls(grbl, {
   log,
   onSavedMacro: id => savedMacroRunner.run(id),
   onSuspend: () => savedMacroRunner.cancel(),
-  onMode(mode) {
-    $('mode').textContent = mode;
-    onControllerState('Grbl', session.state);
-  },
+  onMode() { onControllerState('Grbl', session.state); },
   onCoordinates() { onControllerState('Grbl', session.state); },
 });
-$('mode').textContent = controls.mode;
+function refreshJogUI() {
+  const readout = controls.readout;
+  $('mode').textContent = readout.mode;
+  $('rd').textContent = readout.rate;
+  $('largeStepsLabel').textContent = readout.largeSteps;
+}
+refreshJogUI();
 
 function refreshCtxUI() {
   setPill('tokenPill', !!ctx.token, ctx.token ? 'token ready' : 'no token');
@@ -150,6 +153,7 @@ function connectSocket() {
 let displayError = '';
 let displayNotice = '';
 async function onControllerState(type, state) {
+  refreshJogUI();
   if (!pendant.connected) return;
   try {
     const unsupportedAxes = [0x14, 0x15, 0x16].includes(controls.axisCode);
@@ -178,7 +182,8 @@ function handleInput(d) {
 
   // mirror to UI
   $('k1').textContent = d.firstKey; $('k2').textContent = d.secondKey;
-  $('ld').textContent = d.leftDial; $('rd').textContent = d.rightDial;
+  $('ld').textContent = d.leftDial;
+  refreshJogUI();
   $('jog').textContent = String(d.jog);
 }
 

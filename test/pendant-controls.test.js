@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Grbl } from '../web/widget/grbl.js';
-import { PendantControls, parseConfig } from '../web/widget/pendant-controls.js';
+import { PendantControls, SELECTORS, parseConfig } from '../web/widget/pendant-controls.js';
 import { RightDial } from '../web/whb04b-webhid.js';
 
 function clock() {
@@ -16,7 +16,7 @@ function fixture() {
     subscribeMotion(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     positionReport: { kind: 'MPos', values: [0,0,0], sequence: 1, units: '0', resolution: 0.001 },
     reportSequence: 1, idleReports: 2, overrideSequence: 1, overrides: [100, 100, 100],
-    state: { parserstate: { spindle: '500', modal: { spindle: 'M5', coolant: 'M9' } } },
+    state: { parserstate: { spindle: '500', modal: { units: 'G21', spindle: 'M5', coolant: 'M9' } } },
     settings: { settings: { $110: '3000', $111: '3000', $112: '1000', $30: '1000', $31: '0' } },
     command: (...args) => { commands.push(args); return 'sent'; }, stop: () => commands.push(['stop']) };
   Object.defineProperty(session, 'positionReports', { get: () => ({ [session.positionReport.kind]: session.positionReport }) });
@@ -144,6 +144,102 @@ test('Step selects each axis maximum rate independently of program Feed % and di
       }
     }
   }
+});
+
+test('Step converts every numeric selector in current program units to internal mm for XYZ in both directions', () => {
+  for (const [units, scale] of [['G21', 1], ['G20', 25.4]]) {
+    for (const [leftDialCode, axis, max] of [[0x11, 'X', 3000], [0x12, 'Y', 3000], [0x13, 'Z', 1000]]) {
+      for (const [code, selection] of Object.entries(SELECTORS)) {
+        for (const jog of [-3, 3]) {
+          const f = fixture(), requests = [];
+          f.session.state.parserstate.modal.units = units;
+          f.controls.setConfig({ largeSteps: 'enabled' });
+          f.grbl.jog = (...args) => requests.push(args);
+          f.input({ leftDialCode, rightDialCode: Number(code), jog });
+          assert.deepEqual(requests, [[axis, jog * selection.step * scale, max]], `${units} ${axis} selector ${code} jog ${jog}`);
+          assert.equal(f.grbl.pendingOverrides.size, 0);
+        }
+      }
+    }
+  }
+});
+
+test('large Step opt-in applies only to numeric 5/10, allowing one inch without opt-in', () => {
+  for (const units of ['G20', 'G21']) {
+    const f = fixture(), requests = [];
+    f.session.state.parserstate.modal.units = units;
+    f.grbl.jog = (...args) => requests.push(args);
+    f.input({ rightDialCode: 0x10, jog: 1 });
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0][1], units === 'G20' ? 25.4 : 1);
+    for (const rightDialCode of [0x1a, 0x1b]) {
+      f.input({ rightDialCode, jog: 1 });
+      assert.equal(requests.length, 1);
+      assert.match(f.logs.at(-1), new RegExp(`5/10 ${units === 'G20' ? 'in' : 'mm'} steps are disabled`));
+    }
+  }
+});
+
+test('unknown Step units refuse wheel input clearly and recovery uses only the next detent', () => {
+  for (const units of [undefined, null, '', 'G22', 'g20', 20]) {
+    const f = fixture(), requests = [];
+    f.session.state.parserstate.modal.units = units;
+    f.grbl.jog = (...args) => requests.push(args);
+    f.input({ jog: 4 });
+    assert.deepEqual(requests, []);
+    assert.match(f.logs.at(-1), /Step: waiting for known GRBL G20\/G21 program units; wheel input ignored/);
+    f.session.state.parserstate.modal.units = 'G20';
+    f.input({ jog: -1 });
+    assert.deepEqual(requests, [['X', -0.1 * 25.4, 3000]]);
+    f.session.state.parserstate.modal.units = 'G21';
+    f.input({ jog: 2 });
+    assert.deepEqual(requests.at(-1), ['X', 0.2, 3000]);
+  }
+});
+
+test('Step inch input reaches the wire in current program units without changing report units', () => {
+  const f = fixture();
+  f.session.state.parserstate.modal.units = 'G20';
+  f.input({ rightDialCode: 0x10, jog: -1 });
+  assert.deepEqual(f.commands, [['gcode', '$J=G20 G91 X-1.000000 F118.110236']]);
+  assert.equal(f.session.positionReport.units, '0');
+});
+
+test('Continuous input keeps physical mm and mm/min independent of program modal units', () => {
+  for (const units of ['G20', 'G21']) {
+    const f = fixture(), requests = [];
+    f.session.state.parserstate.modal.units = units;
+    f.grbl.jogPulse = (...args) => { requests.push(args); return 'sent'; };
+    f.input({ rightDialCode: 0x0d });
+    f.press(0x0e);
+    f.input({ jog: -1 });
+    assert.deepEqual(requests, [['X', -0.2, 60]]);
+  }
+});
+
+test('readout follows program units and known mode without presenting Step as a feed percentage', () => {
+  const f = fixture();
+  f.input({ rightDialCode: 0x0f });
+  assert.deepEqual(f.controls.readout, { mode: 'step (mm)', rate: '0.1 mm', largeSteps: '5/10 mm steps' });
+  f.session.state.parserstate.modal.units = 'G20';
+  assert.deepEqual(f.controls.readout, { mode: 'step (in)', rate: '0.1 in', largeSteps: '5/10 in steps' });
+  f.session.state.parserstate.modal.units = undefined;
+  assert.deepEqual(f.controls.readout, {
+    mode: 'step (waiting for G20/G21)', rate: '0.1 (waiting for G20/G21)', largeSteps: '5/10 steps (waiting for G20/G21)',
+  });
+  f.session.state.parserstate.modal.units = 'G21';
+  f.press(0x0e);
+  assert.equal(f.controls.readout.mode, 'continuous (mm)');
+  assert.equal(f.controls.readout.rate, '10% feed');
+  f.input({ rightDialCode: 0x9b });
+  assert.equal(f.controls.readout.mode, 'lead');
+  assert.equal(f.controls.readout.rate, 'Spindle override');
+  f.input({ rightDialCode: 0x0e });
+  assert.equal(f.controls.readout.mode, 'mpg');
+  assert.equal(f.controls.readout.rate, '5% feed');
+  f.press(0x0f);
+  f.input({ rightDialCode: 0xff });
+  assert.equal(f.controls.readout.rate, '—');
 });
 
 test('the next Step uses the latest maximum-rate setting for the same axis', () => {

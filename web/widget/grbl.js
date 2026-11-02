@@ -8,6 +8,10 @@ const SETTLED_IDLE_REPORTS = 5;
 const CONFIRM_DELAY = 750;
 const CONFIRM_INTERVAL = 250;
 const FEEDBACK_TIMEOUT = 3000;
+const JOG_UNITS = {
+  G20: { code: 'G20', scale: 25.4, label: 'in', distanceDecimals: 6, feedDecimals: 6 },
+  G21: { code: 'G21', scale: 1, label: 'mm', distanceDecimals: 4, feedDecimals: 3 },
+};
 
 export class Grbl {
   constructor(session, getProbeThickness = () => 20, log = () => {}, { schedule = (fn, ms) => setTimeout(fn, ms), cancel = id => clearTimeout(id), now = () => performance.now() } = {}) {
@@ -38,6 +42,10 @@ export class Grbl {
   get state() { return this.session.state || {}; }
   get settings() { return this.session.settings?.settings || {}; }
   get activeState() { return this.session.motionState || this.session.activeState || this.state.status?.activeState || ''; }
+  get jogUnits() {
+    const code = this.state.parserstate?.modal?.units;
+    return code === 'G20' || code === 'G21' ? JOG_UNITS[code] : null;
+  }
   _cmd(directive, data) { return this.session.command(directive, data); }
   gcode(g) { return this._cmd('gcode', g); }
   reset() { this.clearOverrides(); this.clearJog(); this._cmd('reset'); }
@@ -244,7 +252,9 @@ export class Grbl {
     return ['queued', 'written'].includes(this.jogReceipt?.state);
   }
   bufferJog(axis, distance, feed) {
-    const total = Number(((this.jogBacklog?.distance ?? 0) + Number(distance.toFixed(4))).toFixed(4));
+    // Keep input in physical millimetres; only the eventual wire command rounds
+    // it. A modal unit change must not reinterpret already requested detents.
+    const total = (this.jogBacklog?.distance ?? 0) + distance;
     this.jogBacklog = { axis, distance: total, feed };
     if (this.jogAwaitingReply()) { this.flushBacklog(); return 'buffered'; }
     return this.sendBacklog();
@@ -266,13 +276,33 @@ export class Grbl {
   }
   sendBacklog() {
     const backlog = this.jogBacklog;
-    this.dropBacklog();
+    if (!backlog) return 'dropped';
     if (!this.backlogReleased()) {
+      this.dropBacklog();
       this.log(`Step: discarded ${backlog.distance.toFixed(4)} mm of merged ${backlog.axis} wheel input; the jog was interrupted.`);
       return 'dropped';
     }
     // Detents that returned to their start cancel out; nothing to send.
-    if (Math.abs(backlog.distance) < 0.00005) { this.cancelJogTimer(); this.refreshJog(); return 'buffered'; }
+    if (Math.abs(backlog.distance) < 1e-12) { this.dropBacklog(); this.cancelJogTimer(); this.refreshJog(); return 'buffered'; }
+    // Missing modal feedback is not a canceled motion session. Retain the
+    // physical input until a known mode can serialize it, or an explicit
+    // interruption/cancellation clears it. Do not flood the log while waiting.
+    const units = this.jogUnits;
+    if (!units) {
+      if (!backlog.waitingUnits) {
+        this.log('Step: queued wheel input retained; waiting for known G20/G21 program units.');
+        backlog.waitingUnits = true;
+      }
+      this.flushBacklog();
+      return 'buffered';
+    }
+    this.dropBacklog();
+    if (!this.jogWords(backlog.distance, backlog.feed, this.maxRate(backlog.axis), units)) {
+      this.log(`Step: discarded merged ${backlog.axis} wheel input; distance/feed rounds to zero or is unrepresentable in ${units.code}.`);
+      this.cancelJogTimer();
+      this.refreshJog();
+      return 'dropped';
+    }
     const result = this.jog(backlog.axis, backlog.distance, backlog.feed);
     if (result === 'dropped') this.log(`Step: discarded ${backlog.distance.toFixed(4)} mm of merged ${backlog.axis} wheel input.`);
     return result;
@@ -385,8 +415,23 @@ export class Grbl {
     }
     return this.jog(axis, distance, feed);
   }
+  // Public jog inputs and completion targets are always mm and mm/min.
+  // Clamp physically first, then floor the wire feed so rounding never raises
+  // it above the requested speed or the axis maximum.
+  jogWords(distance, feed, max, units) {
+    if (!max) return null;
+    const distanceWord = (distance / units.scale).toFixed(units.distanceDecimals);
+    const limit = Math.min(feed, max);
+    const precision = 10 ** units.feedDecimals;
+    let ticks = Math.floor(limit / units.scale * precision);
+    if (ticks / precision * units.scale > limit) ticks -= 1;
+    const feedWord = (ticks / precision).toFixed(units.feedDecimals);
+    if (!Number.isFinite(Number(distanceWord)) || Number(distanceWord) === 0
+      || !Number.isFinite(Number(feedWord)) || !(Number(feedWord) > 0)) return null;
+    return { distance: distanceWord, feed: feedWord, millimetres: Number(distanceWord) * units.scale };
+  }
   jog(axis, distance, feed) {
-    if (!['X', 'Y', 'Z'].includes(axis) || !Number.isFinite(distance) || Math.abs(distance) < 0.00005 || !Number.isFinite(feed) || !(feed > 0)) return this.refuse('Jog requires an XYZ axis and finite distance/feed.');
+    if (!['X', 'Y', 'Z'].includes(axis) || !Number.isFinite(distance) || distance === 0 || !Number.isFinite(feed) || !(feed > 0)) return this.refuse('Jog requires an XYZ axis and finite nonzero distance/positive feed.');
     if (this.jogSessionChanged()) this.clearJog();
     this.recoverJogError();
     if (this.jogPhase === 'canceling') {
@@ -396,6 +441,10 @@ export class Grbl {
     if (!this.manualReady('allow-jog')) return this.refuse('Jog: controller must be idle or jogging with no running program.');
     const max = this.maxRate(axis);
     if (!max) return this.refuse(`Jog: waiting for GRBL ${axis} maximum-rate setting.`);
+    const units = this.jogUnits;
+    if (!units) return this.refuse('Jog: waiting for known program units (G20 inches or G21 millimetres).');
+    const words = this.jogWords(distance, feed, max, units);
+    if (!words) return this.refuse('Jog: distance/feed rounds to zero or is unrepresentable in the current program units.');
     // At most one owned line awaits the controller's reply; later wheel input on
     // the same axis merges and goes out once that reply arrives. Input arriving
     // before the timer sends the merge joins it, keeping detents in order.
@@ -424,7 +473,7 @@ export class Grbl {
     const sequence = this.session.reportSequence;
     const positionSequence = this.session.positionReport?.sequence ?? 0;
     const errorSequence = this.session.errorSequence ?? 0;
-    const receipt = this.session.jog(`$J=G21 G91 ${axis}${distance.toFixed(4)} F${Math.min(feed, max).toFixed(3)}`);
+    const receipt = this.session.jog(`$J=${units.code} G91 ${axis}${words.distance} F${words.feed}`);
     if (receipt.state === 'dropped') { if (this.jogPhase === 'active') this.observeJog(); return 'dropped'; }
     if (generation !== this.session.generation || epoch !== this.session.motionEpoch || workflowEpoch !== this.session.workflowEpoch) {
       this.clearJog();
@@ -440,7 +489,7 @@ export class Grbl {
     this.jogErrorSequence = errorSequence;
     this.jogSequence = sequence;
     this.jogPositionSequence = positionSequence;
-    this.jogTarget = previous ? { ...previous, axis, start: position?.value ?? previous.start, value: previous.value + Number(distance.toFixed(4)) } : null;
+    this.jogTarget = previous ? { ...previous, axis, start: position?.value ?? previous.start, value: previous.value + words.millimetres } : null;
     this.confirmRequests = 0;
     this.confirmBlocked = false;
     this.observedReceiptState = receipt.state;

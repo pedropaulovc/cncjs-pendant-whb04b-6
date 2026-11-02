@@ -41,6 +41,17 @@ export class PendantControls {
     this.lastPulse = -Infinity;
     this.direction = 0;
   }
+  get readout() {
+    const units = this.grbl.jogUnits;
+    const unitLabel = units?.label ?? 'waiting for G20/G21';
+    const selection = SELECTORS[this.rateCode];
+    const mode = ['step', 'continuous'].includes(this.mode) ? `${this.mode} (${unitLabel})` : this.mode;
+    const rate = this.mode === 'lead' ? 'Spindle override'
+      : !selection ? '—'
+      : this.mode === 'step' ? `${selection.step} ${units ? units.label : '(waiting for G20/G21)'}`
+      : `${selection.percent}% feed`;
+    return { mode, rate, largeSteps: `5/10 ${units ? `${units.label} steps` : 'steps (waiting for G20/G21)'}` };
+  }
   setConfig(config) { this.suspend(); this.config = parseConfig(config); }
   suspend() {
     this.onSuspend();
@@ -112,10 +123,12 @@ export class PendantControls {
     if (this.mode === 'mpg') { this.grbl.override('feed', report.jog); return; }
     const axis = AXES[this.axisCode];
     if (this.mode === 'step') {
-      if (selection.step > 1 && this.config.largeSteps !== 'enabled') { this.log('5/10 mm steps are disabled; enable them in pendant settings if required.'); return; }
+      const units = this.grbl.jogUnits;
+      if (!units) { this.log('Step: waiting for known GRBL G20/G21 program units; wheel input ignored.'); return; }
+      if (selection.step > 1 && this.config.largeSteps !== 'enabled') { this.log(`5/10 ${units.label} steps are disabled; enable them in pendant settings if required.`); return; }
       const max = this.grbl.maxRate(axis);
       if (!max) { this.log(`Step: waiting for GRBL ${axis} maximum-rate setting.`); return; }
-      this.grbl.jog(axis, report.jog * selection.step, max);
+      this.grbl.jog(axis, report.jog * selection.step * units.scale, max);
       return;
     }
     if (this.mode !== 'continuous') return;
