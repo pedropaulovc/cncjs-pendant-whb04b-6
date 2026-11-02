@@ -45,6 +45,10 @@
   .macro-slot { margin-left: 6px; font-size: 11px; font-weight: 400; color: #666; }
   .macro-choice { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px; align-items: center; font-size: 12px; }
   .macro-choice select { min-width: 0; width: 100%; }
+  .macro-add { align-items: end; }
+  .macro-add .field { flex: 1; min-width: 0; }
+  .macro-add select { width: 100%; }
+  .macro-assignment > button { margin-top: 6px; }
   .macro-code { display: block; width: 100%; margin-top: 6px; resize: vertical; font-family: monospace; font-size: 12px; }
   .macro-preview { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; padding: 6px; max-height: 12rem; overflow: auto; background: #f5f5f5; font-size: 12px; }
   .macro-note { margin: 6px 0 0; font-size: 12px; overflow-wrap: anywhere; }
@@ -73,22 +77,26 @@
   </dl>
   <p id="operationStatus" role="status" aria-live="polite"></p>
   <div class="panels">
-    <details>
+    <details id="pendantSettings">
       <summary>Pendant settings</summary>
       <div class="row">
         <label class="field">Probe plate mm<input id="thickness" type="number" step="0.01" value="20" /></label>
         <label class="field">Spindle increment (RPM)<input id="spindleIncrement" type="number" min="1" value="100" /></label>
         <label class="field">5/10 mm steps<select id="largeSteps"><option value="disabled">Disabled</option><option value="enabled">Enabled</option></select></label>
       </div>
-      <details><summary>Macro buttons</summary>
-        <p class="settings-help">Choose what each Fn combination runs. Use a saved CNCjs macro or enter custom G-code, one command per line.</p>
-        <p class="settings-help">Saved macros are managed in the CNCjs Macro widget. Assignments here stay linked to those macros, so changes in CNCjs apply when you run them.</p>
-        <button id="refreshMacros" type="button">Refresh CNCjs macros</button>
-        <p id="macroStatus" class="settings-status" role="status" aria-live="polite"></p>
-        <div id="macroAssignments"></div>
-      </details>
-      <button id="saveConfig" type="button">Save settings</button>
-      <p id="settingsStatus" class="settings-status" role="status" aria-live="polite"></p>
+    </details>
+    <details id="macroSettings">
+      <summary>Macro buttons</summary>
+      <p class="settings-help">Add an Fn combination, then choose a saved CNCjs macro or enter custom G-code, one command per line.</p>
+      <p class="settings-help">Saved macros stay linked to the CNCjs Macro widget. Save settings applies all pendant and macro changes together.</p>
+      <button id="refreshMacros" type="button">Refresh CNCjs macros</button>
+      <p id="macroStatus" class="settings-status" role="status" aria-live="polite"></p>
+      <p id="macroEmpty" class="settings-help">No macro buttons assigned. Choose an Fn combination below to add one.</p>
+      <div id="macroAssignments"></div>
+      <div class="row macro-add">
+        <label class="field" for="macroButtonToAdd">Unused Fn combination<select id="macroButtonToAdd"></select></label>
+        <button id="addMacro" type="button">Add macro button</button>
+      </div>
     </details>
     <details>
       <summary>Diagnostics</summary>
@@ -96,6 +104,10 @@
       <pre id="log" aria-label="Pendant diagnostic log" tabindex="0"></pre>
     </details>
   </div>
+  <div id="settingsActions" class="row" hidden>
+    <button id="saveConfig" type="button">Save settings</button>
+  </div>
+  <p id="settingsStatus" class="settings-status" role="status" aria-live="polite"></p>
   <script type="module" src="./whb04b-widget.js"></script>
 </body>
 </html>

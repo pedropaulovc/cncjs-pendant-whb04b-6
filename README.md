@@ -72,9 +72,9 @@ machine coordinates to the pendant LCD.
 
 The compact operating view uses CNCjs-like light controls, with connection status
 and one readout for mode, selected axis, rate/step selector, and wheel delta.
-**Pendant settings** holds probe plate thickness, spindle increment, large steps,
-and **Macro buttons**. **Diagnostics** holds raw keys and a scroll-bounded log;
-both panels start collapsed. The latest log message also appears in the live
+**Pendant settings** holds probe plate thickness, spindle increment, and large steps.
+**Macro buttons** is a separate top-level panel. **Diagnostics** holds raw keys
+and a scroll-bounded log; all three panels start collapsed. The latest log message also appears in the live
 status line, so connection, jogging, and LCD errors are visible without opening
 Diagnostics. **Re-read creds & connect** retries the CNCjs session using the
 parent frame's credentials. The layout wraps to fit narrow widget columns.
@@ -152,16 +152,22 @@ The remaining Fn combinations run operator-configured G-code macros:
 | Reset / Stop / Start-Pause | 11 / 12 / 13 |
 | Macro-10 | 14 |
 
-Configure these under **Pendant settings → Macro buttons**. Each labelled Fn
-combination can be disabled, assigned multiline custom G-code, or linked to a saved
-CNCjs macro. Click **Save settings** to apply the assignments in this browser.
-An unconfigured macro
-only logs its slot number. Bare Reset and Stop retain their normal behavior.
+Configure these under **Macro buttons**. Only configured assignments are listed
+initially. Choose an **Unused Fn combination** and click **Add macro button**
+to add one row at a time; combinations already listed cannot be added twice.
+Each row can be disabled, assigned multiline custom G-code, or linked to a saved
+CNCjs macro. **Remove macro** removes that row from the pending assignments.
+Click the shared **Save settings** button to apply both pendant settings and macro
+assignments in this browser; removed, disabled, and empty custom assignments are
+omitted from the saved configuration. This button is available whenever either
+configuration panel is open or there are unsaved changes. Closing panels does not
+discard edits or hide the unsaved status. An unconfigured macro only logs its slot
+number. Bare Reset and Stop retain their normal behavior.
 
 Saved macros come from the same CNCjs Macro widget and remain linked by ID. The
 list refreshes when CNCjs settings change; **Refresh CNCjs macros** reloads it
 manually without discarding unsaved edits. Deleted macros remain visibly
-unavailable until you replace or disable their assignments.
+unavailable until you replace, disable, or remove their assignments.
 
 Each press fetches the current definition and sends that checked snapshot through
 CNCjs's G-code feeder. Controller variables such as `posx` and `modal.units`, and
