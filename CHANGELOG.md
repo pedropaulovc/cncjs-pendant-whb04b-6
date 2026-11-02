@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [3.2.6] - 2026-11-02
+
+### Changed
+
+- Restyled the pendant widget to match CNCjs's compact, light Bootstrap-like controls: a connection bar and single operating readout replace the page heading and large cards.
+- Moved probe thickness into collapsed Pendant settings, and raw keys and the bounded log into collapsed Diagnostics. The latest diagnostic message remains visible in a live status line even when Diagnostics is closed. Existing controls, defaults, and motion behavior are unchanged.
+
 ## [3.2.5] - 2026-11-02
 
 ### Fixed

@@ -91,6 +91,7 @@ function listenParentMessages(onChange) {
 //---------------------------------------------------------------------------
 const $ = (id) => document.getElementById(id);
 function log(m) {
+  $('operationStatus').textContent = m;
   const el = $('log');
   el.textContent += `[${new Date().toLocaleTimeString()}] ${m}\n`;
   el.scrollTop = el.scrollHeight;
@@ -134,7 +135,7 @@ const controls = new PendantControls(grbl, {
 $('mode').textContent = controls.mode;
 
 function refreshCtxUI() {
-  setPill('tokenPill', !!ctx.token, ctx.token ? 'token ✓' : 'no token');
+  setPill('tokenPill', !!ctx.token, ctx.token ? 'token ready' : 'no token');
   setPill('portPill', !!ctx.port, ctx.port ? `port ${ctx.port}` : 'no port');
 }
 
@@ -215,8 +216,8 @@ function boot() {
   listenParentMessages(refreshCtxUI);
   refreshCtxUI();
 
-  pendant.addEventListener('attach', () => { setPill('hidPill', true, 'pendant ✓'); log('Pendant connected.'); onControllerState('Grbl', session.state); });
-  pendant.addEventListener('remove', () => { controls.suspend(); grbl.clearOverrides(); controls.keys.clear(); setPill('hidPill', false, 'pendant ✗'); log('Pendant removed.'); });
+  pendant.addEventListener('attach', () => { setPill('hidPill', true, 'pendant ready'); log('Pendant connected.'); onControllerState('Grbl', session.state); });
+  pendant.addEventListener('remove', () => { controls.suspend(); grbl.clearOverrides(); controls.keys.clear(); setPill('hidPill', false, 'pendant offline'); log('Pendant removed.'); });
   pendant.addEventListener('use', (e) => handleInput(e.detail));
 
   // Re-attach to an already-authorised pendant without a prompt.
