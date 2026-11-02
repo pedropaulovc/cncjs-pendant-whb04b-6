@@ -1525,8 +1525,12 @@ for(const code of ['G20','G21']) for(const reportUnits of ['0','1']) for(const k
     const f=gatedJogFixture();
     f.broadcast({modal:{units:code}});
     f.session.settings.settings.$13=reportUnits;
-    const report=mm=>f.socket.receive('serialport:read',`<Idle|${kind}:${(mm/(reportUnits==='1'?25.4:1)).toFixed(reportUnits==='1'?4:3)},0,0|FS:0,0>`);
+    const decimals=reportUnits==='1'?4:3;
+    // GRBL reports every coordinate at the configured precision. Integer zero
+    // words would conservatively make this entire frame one report-unit coarse.
+    const report=mm=>f.socket.receive('serialport:read',`<Idle|${kind}:${[mm/(reportUnits==='1'?25.4:1),0,0].map(value=>value.toFixed(decimals)).join(',')}|FS:0,0>`);
     report(25.4);
+    assertNear(f.grbl.position('X').resolution,reportUnits==='1'?0.00254:0.001);
     assert.equal(f.grbl.jog('X',25.4,254),'sent');
     assert.equal(jogCommands(f).at(-1)[1],code==='G20'?'$J=G20 G91 X1.000000 F10.000000':'$J=G21 G91 X25.4000 F254.000');
     assert.equal(f.grbl.jogTarget.kind,kind);
@@ -1535,6 +1539,25 @@ for(const code of ['G20','G21']) for(const reportUnits of ['0','1']) for(const k
     assert.equal(f.grbl.jogPhase,'idle');
     assert.equal(f.session.settings.settings.$13,reportUnits);
     f.grbl.clearJog();
+  });
+}
+
+for(const code of ['G20','G21']) for(const kind of ['MPos','WPos']) {
+  test(`${code} coarse inch ${kind} reports retain the two post-ACK Idle guard`,()=>{
+    const f=gatedJogFixture();
+    f.broadcast({modal:{units:code}});
+    f.session.settings.settings.$13='1';
+    const report=inches=>f.socket.receive('serialport:read',`<Idle|${kind}:${inches.toFixed(4)},0,0|FS:0,0>`);
+    report(1);
+    assertNear(f.grbl.position('X').resolution,25.4);
+    assert.equal(f.grbl.jog('X',25.4,254),'sent');
+    assert.equal(f.grbl.jogReceipt.state,'acknowledged');
+    report(2);
+    assert.equal(f.grbl.jogPhase,'active','one coarse endpoint cannot bypass the raw Idle guard');
+    report(2);
+    assert.equal(f.grbl.jogPhase,'idle','two fresh post-ACK Idle reports confirm the ambiguous move');
+    assert.equal(f.jobs.size,0);
+    assert.equal(f.queries(),0);
   });
 }
 
