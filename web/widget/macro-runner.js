@@ -53,7 +53,7 @@ export class SavedMacroRunner {
         return 'dropped';
       }
       const result = this.grbl.macro(record.content);
-      if (result === 'sent') this.log(`${label} queued: ${record.name}`);
+      if (result === 'sent') this.log(`${label === 'Saved macro' ? 'Saved CNCjs macro' : label} queued: ${record.name}`);
       return result;
     } catch (error) {
       if (intent === this.intent) this.log(`${label}: ${error.message}`);
