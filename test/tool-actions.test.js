@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { CncjsMacros } from '../web/widget/cncjs-macros.js';
 import { SavedMacroRunner } from '../web/widget/macro-runner.js';
 import { PendantControls } from '../web/widget/pendant-controls.js';
+import { CncjsSession } from '../web/widget/cncjs-session.js';
 
 function fixture() {
   const calls = [], commands = [], logs = [];
@@ -140,3 +141,67 @@ test('fire-and-forget physical dispatch contains read rejections and logs failur
   f.controls.key(13, 'plain'); await settled;
   assert.deepEqual(f.commands, []); assert.match(f.logs.at(-1), /request failed/);
 });
+
+for (const action of actions) {
+  test(`${action.name} cannot replay after a same-dial wheel jog completes during its read`, async () => {
+    const f = fixture(), jogs = [];
+    let cancellations = 0;
+    f.grbl.cancelJog = () => { cancellations++; };
+    f.grbl.jogUnits = { label: 'mm', scale: 1 };
+    f.grbl.maxRate = () => 3000;
+    f.grbl.jog = (...args) => { jogs.push(args); f.grbl.jogPhase = 'active'; return 'sent'; };
+    const report = { firstKeyCode: 0, secondKeyCode: 0, leftDialCode: 0x11, rightDialCode: 0x0f, jog: 0 };
+    f.controls.handleInput(report);
+    const finish = f.defer(), pending = action.run(f);
+    assert.equal(f.calls.length, 1);
+    const beforeWheel = cancellations;
+    f.controls.handleInput({ ...report, jog: 1 });
+    assert.deepEqual(jogs, [['X', 0.1, 3000]]);
+    assert.equal(cancellations, beforeWheel, 'wheel input must not cancel the jog queue');
+    // The ordinary jog has fully completed before the server answers; transient
+    // jogPhase readiness alone cannot identify the superseded tool-button intent.
+    f.grbl.jogPhase = 'idle';
+    finish();
+    assert.equal(await pending, 'dropped');
+    assert.deepEqual(f.commands, []);
+  });
+}
+
+for (const channel of ['native', 'raw']) {
+  for (const activity of ['Run', 'Jog', 'position', 'no-op']) {
+    test(`pending tool action observes external ${channel} ${activity} activity ending Idle`, async () => {
+      const handlers = new Map(), commands = [];
+      const socket = { on(event, handler) { handlers.set(event, handler); return this; }, emit() {}, disconnect() {} };
+      const session = new CncjsSession({ origin: 'http://localhost', io: () => socket,
+        schedule: () => 0, cancel() {} });
+      session.connect('token');
+      session.status = { phase: 'joined', port: 'SIMULATOR' };
+      session.workflowState = 'idle';
+      session.settings = { settings: { $13: '0', $110: '3000', $111: '3000', $112: '3000' } };
+      const report = (state, x) => channel === 'native'
+        ? handlers.get('controller:state')('Grbl', { status: { activeState: state, mpos: { x, y: 0, z: 0 } } })
+        : handlers.get('serialport:read')(`<${state}|MPos:${x},0,0>`);
+      const origin = activity === 'no-op' ? 25.4 : 0;
+      report('Idle', origin);
+      let finish;
+      const library = { readToolChangeZ: () => new Promise(resolve => { finish = resolve; }) };
+      const grbl = { jogPhase: 'idle', manualReady: () => session.motionState === 'Idle',
+        macro: code => { commands.push(code); return 'sent'; } };
+      const runner = new SavedMacroRunner({ session, grbl, library });
+      const pending = runner.runClearance();
+      if (['Run', 'Jog'].includes(activity)) report(activity, 0);
+      report('Idle', activity === 'position' ? 1 : origin);
+      if (activity === 'no-op') {
+        report('Idle', String(origin));
+        session.settings.settings.$13 = '1';
+        report('Idle', '1.0000');
+        report('Idle', 1);
+        handlers.get('config:change')();
+        handlers.get('controller:settings')('Grbl', session.settings);
+      }
+      finish(-5);
+      assert.equal(await pending, activity === 'no-op' ? 'sent' : 'dropped');
+      assert.deepEqual(commands, activity === 'no-op' ? [['G21 G53 G0 G90 Z-5']] : []);
+    });
+  }
+}

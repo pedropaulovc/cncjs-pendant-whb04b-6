@@ -132,6 +132,9 @@ export class PendantControls {
     }
     // A button press and wheel delta in one packet must not start new motion.
     if (keys.size || modifier === 'fn' || !Number.isInteger(report.jog) || !report.jog || Math.abs(report.jog) > 127) return;
+    // Wheel intent supersedes an asynchronous button read, but must not cancel
+    // queued/active wheel jogs as suspend() would.
+    this.onSuspend();
     if (this.axisCode === 0x06) return;
     if (!AXES[this.axisCode]) { this.log('GRBL supports XYZ; A/B/C wheel input ignored.'); return; }
     if (LEAD.has(this.rateCode)) { this.grbl.override('spindle', report.jog); return; }

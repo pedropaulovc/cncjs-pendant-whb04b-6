@@ -42,13 +42,14 @@ export class SavedMacroRunner {
       this.log(`${label}: wait for an idle controller with no running program or pending jog.`);
       return 'dropped';
     }
-    const { generation, motionEpoch, workflowEpoch } = this.session;
+    const { generation, motionEpoch, workflowEpoch, manualActivityEpoch } = this.session;
     const port = this.session.status.port;
     try {
       const record = await load();
       if (intent !== this.intent) { this.log(`${label} request canceled.`); return 'dropped'; }
       if (generation !== this.session.generation || motionEpoch !== this.session.motionEpoch
         || workflowEpoch !== this.session.workflowEpoch || port !== this.session.status.port
+        || manualActivityEpoch !== this.session.manualActivityEpoch
         || !this.grbl.manualReady() || this.grbl.jogPhase !== 'idle') {
         this.log(`${label} canceled: the controller changed while loading it. Press the button again when idle.`);
         return 'dropped';
