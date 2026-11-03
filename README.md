@@ -77,7 +77,7 @@ while something is wrong. The **i** button beside **Mode** explains Step,
 Continuous, MPG, and the Lead dial position: hover or focus previews it, a click
 keeps it open, and a second click or Escape closes it. The help opens in the page
 flow below the readout, so narrow widget columns do not clip it.
-**Pendant settings** holds probe plate thickness, spindle increment, and large steps.
+**Pendant settings** holds spindle increment and large steps.
 **Macro buttons** is a separate top-level panel. **Diagnostics** holds
 **Re-read creds & connect** (retries the CNCjs session using the parent frame's
 credentials), raw keys, and a scroll-bounded log; all three panels start
@@ -103,14 +103,23 @@ or the sole open port if CNCjs has not supplied a selection. With several open
 ports it waits for an explicit selection. It reconnects after a network drop
 and discards pendant commands while disconnected instead of queuing them.
 
-Step distances and `$J` lines use the active G20/G21 units. Safe-Z moves to
-machine Z = -5 mm; W-Home uses that move before travelling to G54 X0 Y0. Verify
-that height against your machine and workholding before using either key. Probe-Z
-travels up to 50 mm downward at 120 mm/min and uses **Pendant settings → Probe
-plate mm** (20 mm by default). Safe-Z, W-Home, and Probe-Z are deliberately
-millimetres: each selects G21 itself, and the probe plate thickness is always
-millimetres. They leave the controller in G21, so later Step and Continuous jogs
-also use millimetres until G20 is commanded again.
+Step distances and `$J` lines use the active G20/G21 units. Safe-Z reads the
+shared **CNCjs Tool widget → Tool change position → Z** (`tool.toolChangeZ`)
+and moves to that machine-coordinate Z in millimetres. W-Home uses that move
+before travelling to G54 X0 Y0, with no final Z move. Verify that height against
+your machine and workholding before using either key: CNCjs's unset default is
+0 mm, which is not a clearance guarantee.
+Probe-Z travels up to 50 mm downward at 120 mm/min and uses **CNCjs Tool widget
+→ Touch plate height** (`tool.touchPlateHeight`, millimetres, unset default 0)
+to set the G54 Z offset to plate height + 0.001 mm. This is the shared Tool
+setting, not the separate Probe widget's browser-local setting.
+All three keys fetch authenticated `GET /api/tool` on every press; there is no
+pendant clearance or plate-height setting. A missing property or native empty
+response uses CNCjs's default 0; malformed data, invalid numbers, negative plate
+height, failed authentication, or a failed/timed-out read send no motion.
+Stop, another key, disconnect, or controller/workflow changes while loading
+cancel the action. Safe-Z, W-Home, and Probe-Z select G21 and leave the controller
+in millimetres, so later jogs use millimetres until G20 is commanded again.
 
 ## Use the standalone tester
 
@@ -138,10 +147,10 @@ while turning the wheel. The current mode appears in the operating readout.
 | Feed + / - | Feed override +1 / -1 percentage point |
 | Spindle + / - | Spindle override +1 / -1 percentage point |
 | M-Home | GRBL homing |
-| Safe-Z | Machine Z = -5 mm |
-| W-Home | Safe-Z, then G54 X0 Y0 |
+| Safe-Z | Machine Z from CNCjs Tool's tool-change position (mm, unset 0) |
+| W-Home | Shared Safe-Z, then G54 X0 Y0; no final Z move |
 | S on/off | Stop a running spindle or start it at its programmed S speed |
-| Probe-Z | Z touch probe using the plate thickness field |
+| Probe-Z | Z touch probe using CNCjs Tool's shared touch plate height |
 | Continuous / Step | Select the jogging mode |
 | Macro-10 | Toggle the pendant LCD between work and machine coordinates |
 | Fn + Spindle + / - | Increase/decrease programmed S speed (100 RPM by default) |
@@ -295,14 +304,13 @@ confirming report. Their result follows controller feedback, not a local counter
 
 ### Settings and GRBL limits
 
-**Pendant settings** provides probe plate thickness, spindle speed increment, and
-the large-step option. Probe plate thickness (millimetres, 20 by default),
-spindle increment, large steps, and macro assignments save automatically in
+**Pendant settings** provides spindle speed increment and the large-step option.
+Spindle increment, large steps, and macro assignments save automatically in
 browser localStorage under `whb04b-controls`, separately for each browser/profile
 and CNCjs origin, and are restored on reload. An invalid value, such as an empty
-or negative probe plate thickness or an empty spindle increment, is reported and
-not saved; while the probe plate field is invalid, Probe-Z refuses to probe rather
-than use the saved value. Jogging waits for valid controller axis
+spindle increment, is reported and not saved. Tool-change Z and touch plate
+height are read from the CNCjs server instead of stored by the pendant.
+Jogging waits for valid controller axis
 maximum-rate settings and a known G20/G21 mode instead of guessing a machine
 speed or unit.
 If GRBL reports an error while the pendant owns a jog, the widget logs the error,

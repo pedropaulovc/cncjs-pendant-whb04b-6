@@ -14,8 +14,8 @@ const JOG_UNITS = {
 };
 
 export class Grbl {
-  constructor(session, getProbeThickness = () => 20, log = () => {}, { schedule = (fn, ms) => setTimeout(fn, ms), cancel = id => clearTimeout(id), now = () => performance.now() } = {}) {
-    Object.assign(this, { session, getProbeThickness, log, schedule, cancel, now });
+  constructor(session, log = () => {}, { schedule = (fn, ms) => setTimeout(fn, ms), cancel = id => clearTimeout(id), now = () => performance.now() } = {}) {
+    Object.assign(this, { session, log, schedule, cancel, now });
     this.pendingOverrides = new Map();
     this.overrideTimer = null;
     this.jogPhase = 'idle';
@@ -153,13 +153,6 @@ export class Grbl {
     modes.delete(target);
     // GRBL has one coolant-off command; restore the other active channel.
     return this.gcode(['M9', ...[...modes].filter(mode => mode === 'M7' || mode === 'M8')]);
-  }
-  safeZ() { return this.macro('G21 G53 G0 G90 Z-5'); }
-  wcsHome() { return this.macro(['G21 G53 G0 G90 Z-5', 'G21 G54 G0 G90 X0 Y0']); }
-  probeZ() {
-    const thickness = Number(this.getProbeThickness());
-    if (!Number.isFinite(thickness) || thickness < 0) return this.refuse('Enter a valid nonnegative probe plate thickness.');
-    return this.macro(['G21 G91', 'G38.2 Z-50 F120', `G10 L20 P1 Z${thickness + 0.001}`, 'G0 Z3', 'G90']);
   }
   maxRate(axis) {
     const index = ['X', 'Y', 'Z'].indexOf(axis);

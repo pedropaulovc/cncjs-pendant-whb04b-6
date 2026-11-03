@@ -123,12 +123,13 @@ const session = new CncjsSession({
   onState: onControllerState,
   onConfig: refreshMacros,
 });
-// Probing reads the live field: an empty or negative draft refuses Probe-Z.
-const grbl = new Grbl(session, () => $('thickness')?.valueAsNumber ?? NaN, log);
+const grbl = new Grbl(session, log);
 const savedMacroRunner = new SavedMacroRunner({ session, grbl, library: macroLibrary, log });
 const controls = new PendantControls(grbl, {
   log,
   onSavedMacro: id => savedMacroRunner.run(id),
+  onClearance: workHome => savedMacroRunner.runClearance(workHome),
+  onProbe: () => savedMacroRunner.runProbe(),
   onSuspend: () => savedMacroRunner.cancel(),
   onMode() { onControllerState('Grbl', session.state); },
   onCoordinates() { onControllerState('Grbl', session.state); },
@@ -207,7 +208,7 @@ function wireUI() {
     try {
       // valueAsNumber keeps an empty field NaN (rejected) instead of Number('') = 0.
       const value = parseConfig({ macros: macroSettings.getAssignments(), spindleIncrement: $('spindleIncrement').valueAsNumber,
-        probeThickness: $('thickness').valueAsNumber, largeSteps: $('largeSteps').value });
+        largeSteps: $('largeSteps').value });
       // Another widget may already have stored this value; only the storage
       // write is skipped then. This widget's runtime always takes the value.
       const serialized = JSON.stringify(value);
@@ -225,9 +226,8 @@ function wireUI() {
     emptyState: $('macroEmpty'), onRefresh: refreshMacros, onChange: save });
   macroSettings.setAssignments(controls.config.macros);
   $('spindleIncrement').value = controls.config.spindleIncrement;
-  $('thickness').value = controls.config.probeThickness;
   $('largeSteps').value = controls.config.largeSteps;
-  for (const id of ['spindleIncrement', 'thickness', 'largeSteps']) $(id).addEventListener('input', save);
+  for (const id of ['spindleIncrement', 'largeSteps']) $(id).addEventListener('input', save);
 }
 
 function boot() {

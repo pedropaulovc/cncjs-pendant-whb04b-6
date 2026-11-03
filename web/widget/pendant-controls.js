@@ -23,14 +23,12 @@ export const MACRO_BUTTONS = [
 const MACROS = Object.fromEntries(MACRO_BUTTONS.map(definition => [definition.key, definition]));
 const LEAD = new Set([0x1c, 0x9b]);
 export const CONFIG_KEY = 'whb04b-controls';
-// Probe plate thickness is always millimetres: Probe-Z selects G21 itself.
-export const DEFAULT_CONFIG = { largeSteps: 'disabled', spindleIncrement: 100, probeThickness: 20, macros: {} };
+export const DEFAULT_CONFIG = { largeSteps: 'disabled', spindleIncrement: 100, macros: {} };
 
 export function parseConfig(value) {
   const config = Object.fromEntries(Object.entries(DEFAULT_CONFIG).map(([key, fallback]) => [key, value?.[key] === undefined ? fallback : value[key]]));
   if (!['enabled', 'disabled'].includes(config.largeSteps)) throw new Error('Large steps must be enabled or disabled.');
   if (!Number.isFinite(config.spindleIncrement) || config.spindleIncrement <= 0) throw new Error('Spindle increment must be positive RPM.');
-  if (!Number.isFinite(config.probeThickness) || config.probeThickness < 0) throw new Error('Probe plate thickness must be a nonnegative number of millimetres.');
   if (!config.macros || typeof config.macros !== 'object' || Array.isArray(config.macros)) throw new Error('Macros must be an object keyed by macro number.');
   const allowed = new Set(MACRO_BUTTONS.map(({ slot }) => slot));
   for (const [number, code] of Object.entries(config.macros)) {
@@ -43,9 +41,9 @@ export function parseConfig(value) {
 }
 
 export class PendantControls {
-  constructor(grbl, { log = () => {}, onMode = () => {}, onCoordinates = () => {}, onSavedMacro = () => {}, onSuspend = () => {},
+  constructor(grbl, { log = () => {}, onMode = () => {}, onCoordinates = () => {}, onSavedMacro = () => {}, onClearance = () => {}, onProbe = () => {}, onSuspend = () => {},
     schedule = (fn, ms) => setTimeout(fn, ms), cancel = id => clearTimeout(id), now = () => performance.now(), config = DEFAULT_CONFIG } = {}) {
-    Object.assign(this, { grbl, log, onMode, onCoordinates, onSavedMacro, onSuspend, schedule, cancel, now });
+    Object.assign(this, { grbl, log, onMode, onCoordinates, onSavedMacro, onClearance, onProbe, onSuspend, schedule, cancel, now });
     this.config = parseConfig(config);
     this.mode = 'step';
     this.coordinates = 'work';
@@ -108,8 +106,8 @@ export class PendantControls {
       1: () => this.grbl.reset(), 2: () => this.grbl.stop(), 3: () => this.grbl.startPause(),
       4: () => this.grbl.override('feed', 1), 5: () => this.grbl.override('feed', -1),
       6: () => this.grbl.override('spindle', 1), 7: () => this.grbl.override('spindle', -1),
-      8: () => this.grbl.homing(), 9: () => this.grbl.safeZ(), 10: () => this.grbl.wcsHome(),
-      11: () => this.grbl.spindleToggle(), 13: () => this.grbl.probeZ(),
+      8: () => this.grbl.homing(), 9: () => this.onClearance(false), 10: () => this.onClearance(true),
+      11: () => this.grbl.spindleToggle(), 13: () => this.onProbe(),
       14: () => this.setMode('continuous'), 15: () => this.setMode('step'),
       16: () => { this.coordinates = this.coordinates === 'work' ? 'machine' : 'work'; this.onCoordinates(this.coordinates); this.log(`Display: ${this.coordinates} coordinates.`); },
     };

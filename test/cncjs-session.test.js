@@ -351,21 +351,6 @@ test('port close disarms commands and resumes discovery without closing hardware
   assert.equal(f.emitted.some(([event]) => event === 'close' || event === 'command'), false);
 });
 
-test('fixed SafeZ, WHome, and probe macros remain G21 with millimetre plate thickness under G20', (t) => {
-  const commands = [];
-  const grbl = new Grbl({ command: (...args) => commands.push(args), status: { phase: 'joined' }, subscribeMotion: () => () => {},
-    jog: code => { commands.push(['gcode', code]); return { state: 'queued' }; },
-    state: { parserstate: { modal: { units: 'G20' } } },
-    stopPhase: 'idle', workflowState: 'idle', activeState: 'Idle', settings: { settings: { $110: '3000' } } }, () => 12.5);
-  t.after(() => grbl.clearJog());
-  grbl.safeZ();
-  assert.deepEqual(commands.pop(), ['gcode', 'G21 G53 G0 G90 Z-5']);
-  grbl.wcsHome();
-  assert.deepEqual(commands.splice(0), [['gcode', ['G21 G53 G0 G90 Z-5', 'G21 G54 G0 G90 X0 Y0']]]);
-  grbl.probeZ();
-  assert.deepEqual(commands[0][1], ['G21 G91', 'G38.2 Z-50 F120', 'G10 L20 P1 Z12.501', 'G0 Z3', 'G90']);
-  grbl.clearJog();
-});
 
 test('a canceled poll callback cannot send commands to a new port', () => {
   const f = fixture(); f.join(); f.session.stop();
@@ -480,7 +465,7 @@ function gatedJogFixture(acknowledgements = 'immediate') {
     const unsubscribe=subscribe(listener);
     return ()=>{motionListeners.delete(listener);unsubscribe();};
   };
-  const grbl=new Grbl(f.session,()=>20,message=>logs.push(message), {
+  const grbl=new Grbl(f.session,message=>logs.push(message), {
     now:()=>time,
     schedule:(fn,ms)=>{jobs.add(fn);deadlines.set(fn,time+ms);return fn;},
     cancel:fn=>{jobs.delete(fn);deadlines.delete(fn);},
