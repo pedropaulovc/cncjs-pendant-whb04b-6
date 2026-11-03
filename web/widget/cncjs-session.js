@@ -49,6 +49,9 @@ export class CncjsSession {
     this.motionState = '';
     this.motionEpoch = 0;
     this.workflowEpoch = 0;
+    // Observed activity invalidates pending manual actions without interrupting
+    // the independent jog receipt/ownership lifecycle.
+    this.manualActivityEpoch = 0;
     this.errorSequence = 0;
     this.controllerError = null;
     this.jogReceipts = new Map();
@@ -169,6 +172,7 @@ export class CncjsSession {
       const previousState = this.state?.status?.activeState;
       this.state = state;
       const status = state?.status || {};
+      if (status.activeState && status.activeState !== 'Idle') this.manualActivityEpoch += 1;
       const sequence = this.positionSequence;
       const raw = this.rawPositionReport;
       const rawFrame = status[raw?.kind === 'MPos' ? 'mpos' : 'wpos'];
@@ -247,6 +251,7 @@ export class CncjsSession {
       }
       const state = typeof line === 'string' ? /^<([^|>]+)/.exec(line)?.[1] : null;
       if (state) {
+        if (state !== 'Idle') this.manualActivityEpoch += 1;
         this.activeState = state;
         this.motionState = state;
         this.reportSequence += 1;
@@ -278,6 +283,14 @@ export class CncjsSession {
   recordPosition(kind, words, activeState, sequence) {
     const values = words.map(Number);
     if (!activeState || words.length !== 3 || !values.every(Number.isFinite)) return;
+    const previous = this.positionReports[kind];
+    const units = this.settings.settings?.$13;
+    const scale = Number(units) === 1 ? 25.4 : 1;
+    const previousScale = Number(previous?.units) === 1 ? 25.4 : 1;
+    if (previous && values.some((value, index) => {
+      const current = value * scale, before = previous.values[index] * previousScale;
+      return Math.abs(current - before) > Number.EPSILON * Math.max(1, Math.abs(current), Math.abs(before)) * 4;
+    })) this.manualActivityEpoch += 1;
     this.motionState = activeState;
     this.positionReport = { kind, values, activeState, sequence: sequence ?? ++this.positionSequence,
       units: this.settings.settings?.$13,

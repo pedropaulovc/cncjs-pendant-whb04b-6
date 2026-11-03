@@ -1,4 +1,4 @@
-// Read CNCjs's shared macro store using the same session as the parent widget.
+// Read CNCjs's shared macros and tool settings with the parent widget's session.
 export class CncjsMacros {
   constructor({ getToken, fetch = (...args) => globalThis.fetch(...args) } = {}) {
     this.getToken = getToken;
@@ -6,9 +6,9 @@ export class CncjsMacros {
     this.notice = '';
   }
 
-  async request(path) {
+  async request(path, { label = 'CNCjs macros', format = 'json' } = {}) {
     const token = this.getToken?.();
-    if (typeof token !== 'string' || !token) throw new Error('CNCjs macros: waiting for a session token.');
+    if (typeof token !== 'string' || !token) throw new Error(`${label}: waiting for a session token.`);
     let response;
     try {
       response = await this.fetch(path, {
@@ -19,16 +19,20 @@ export class CncjsMacros {
     } catch (error) {
       const reason = error?.name === 'TimeoutError' || error?.name === 'AbortError'
         ? 'request timed out' : 'request failed';
-      throw new Error(`CNCjs macros: ${reason}.`, { cause: error });
+      throw new Error(`${label}: ${reason}.`, { cause: error });
     }
-    if (response.status === 404) throw new Error('CNCjs macro no longer exists. Refresh the macro list.');
-    if (!response.ok) throw new Error(`CNCjs macros: HTTP ${response.status}.`);
-    try { return await response.json(); }
-    catch (error) {
+    if (response.status === 404 && path.startsWith('/api/macros/')) throw new Error('CNCjs macro no longer exists. Refresh the macro list.');
+    if (!response.ok) throw new Error(`${label}: HTTP ${response.status}.`);
+    try {
+      if (format === 'json') return await response.json();
+      const body = await response.text();
+      // Native GET /api/tool sends an empty 200 body when the tool store is unset.
+      return body === '' ? {} : JSON.parse(body);
+    } catch (error) {
       if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
-        throw new Error('CNCjs macros: request timed out.', { cause: error });
+        throw new Error(`${label}: request timed out.`, { cause: error });
       }
-      throw new Error('CNCjs macros: invalid JSON response.', { cause: error });
+      throw new Error(`${label}: invalid JSON response.`, { cause: error });
     }
   }
 
@@ -50,6 +54,22 @@ export class CncjsMacros {
     const record = validateRecord(await this.request(`/api/macros/${encodeURIComponent(id)}`));
     if (record.id !== id) throw new Error('CNCjs macros: response does not match the selected macro.');
     return record;
+  }
+
+  readToolChangeZ() { return this.readToolNumber('toolChangeZ'); }
+
+  readTouchPlateHeight() { return this.readToolNumber('touchPlateHeight'); }
+
+  async readToolNumber(key) {
+    const nonnegative = key === 'touchPlateHeight';
+    const tool = await this.request('/api/tool', { label: 'CNCjs tool settings', format: 'tool-settings' });
+    if (!tool || typeof tool !== 'object' || Array.isArray(tool)) throw new Error('CNCjs tool settings: invalid tool record.');
+    if (!Object.hasOwn(tool, key)) return 0;
+    const value = tool[key];
+    if (typeof value !== 'number' || !Number.isFinite(value) || (nonnegative && value < 0)) {
+      throw new Error(`CNCjs tool settings: ${key} must be a finite ${nonnegative ? 'nonnegative ' : ''}number of millimetres.`);
+    }
+    return value;
   }
 }
 

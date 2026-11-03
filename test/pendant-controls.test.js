@@ -24,7 +24,7 @@ function fixture() {
     session.command('gcode', code);
     return { state: 'acknowledged', transmission: 'written', reportSequence: session.reportSequence };
   };
-  const grbl = new Grbl(session, () => 20, message => logs.push(message), timer);
+  const grbl = new Grbl(session, message => logs.push(message), timer);
   const controls = new PendantControls(grbl, { ...timer, log: message => logs.push(message) });
   let current = { firstKeyCode: 0, secondKeyCode: 0, leftDialCode: 0x11, rightDialCode: 0x0f, jog: 0 };
   const input = report => { current = { ...current, firstKeyCode: 0, secondKeyCode: 0, jog: 0, ...report }; controls.handleInput(current); };
@@ -282,7 +282,7 @@ test('Step refuses missing or invalid selected-axis limits rather than guessing 
 test('legacy Step feed is ignored and excluded from saved config without losing other settings', () => {
   for (const stepFeed of [0, 17, 99999, 'invalid']) {
     const f = fixture();
-    const settings = { largeSteps: 'enabled', spindleIncrement: 321, probeThickness: 12.5,
+    const settings = { largeSteps: 'enabled', spindleIncrement: 321,
       macros: { 1: 'M3', 2: { source: 'cncjs', id: 'saved', name: 'Saved macro' } } };
     const stored = JSON.stringify({ ...settings, stepFeed });
     f.controls.setConfig(parseConfig(JSON.parse(stored)));
@@ -339,6 +339,19 @@ test('button actions fire on physical press only, with Fn in either key byte', (
   assert.equal(f.commands.filter(([c])=>c==='gcode').length,2);
 });
 
+test('clearance and probe actions dispatch once per physical press', () => {
+  const f = fixture(), actions = [];
+  f.controls.onClearance = action => actions.push(['clearance', action]);
+  f.controls.onProbe = () => actions.push(['probe']);
+  for (const code of [9, 10, 13]) {
+    f.input({ firstKeyCode: code });
+    f.input({ firstKeyCode: code });
+    f.input({});
+  }
+  assert.deepEqual(actions, [['clearance', 'safe-z'], ['clearance', 'work-home'], ['probe']]);
+  assert.deepEqual(f.commands, []);
+});
+
 test('Fn uses macros, spindle RPM/direction, coolant, and Macro10 toggles coordinates', () => {
   const f=fixture(); f.press(6,0x0c); assert.deepEqual(f.commands.at(-1),['gcode','S600']);
   f.press(7,0x0c); assert.deepEqual(f.commands.at(-1),['gcode','S400']);
@@ -383,9 +396,7 @@ test('manual controls refuse a running program and unknown spindle state; cooldo
 });
 
 test('invalid configuration fails without accepting arbitrary macro keys', () => {
-  for (const value of [{largeSteps:true},{spindleIncrement:NaN},{probeThickness:NaN},{probeThickness:-1},{probeThickness:null},{probeThickness:'20'},{macros:[]},{macros:{3:'M3'}},{macros:{1:()=>{}}}]) assert.throws(()=>parseConfig(value));
-  assert.equal(parseConfig({}).probeThickness, 20);
-  assert.equal(parseConfig({ probeThickness: 0 }).probeThickness, 0);
+  for (const value of [{largeSteps:true},{spindleIncrement:NaN},{macros:[]},{macros:{3:'M3'}},{macros:{1:()=>{}}}]) assert.throws(()=>parseConfig(value));
 });
 
 test('configured custom macros refuse unavailable bounds while ordinary commands still run', () => {
@@ -434,13 +445,6 @@ test('Continuous never queues behind a slow segment and never starts motion from
   assert.equal(f.timer.timers.size,0);
 });
 
-test('invalid probe thickness refuses motion while an explicit zero remains valid', () => {
-  const f=fixture(); f.grbl.getProbeThickness=()=>NaN;
-  assert.equal(f.grbl.probeZ(),'dropped'); assert.deepEqual(f.commands,[]);
-  assert.match(f.logs.at(-1),/valid nonnegative probe plate thickness/);
-  f.grbl.getProbeThickness=()=>0; f.grbl.probeZ();
-  assert.equal(f.commands[0][1][2],'G10 L20 P1 Z0.001');
-});
 
 test('two in-flight Idle reports at the old position cannot admit another Continuous segment', () => {
   const f=fixture(); f.input({rightDialCode:0x0d}); f.press(0x0e); f.input({jog:1});

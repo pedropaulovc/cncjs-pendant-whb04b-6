@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [3.2.9] - 2026-11-02
+
+### Changed
+
+- Safe-Z and W-Home fetch CNCjs Tool's shared `tool.toolChangeZ` on every press instead of using machine Z −5 mm. W-Home still moves Z before G54 X0 Y0 and never adds a final Z move.
+- Probe-Z fetches CNCjs Tool's shared metric `tool.touchPlateHeight` on every press. Removed the pendant plate-thickness input and stored setting.
+- Shared Tool settings follow CNCjs's unset default 0 (including the native empty API response). Invalid values, authentication/transport errors, or malformed responses send no motion. Stop, another key, disconnect, or controller/workflow changes cancel pending reads through the existing saved-macro lifecycle. All three actions explicitly select G21; machine Z and plate height are millimetres regardless of previous G20/G21.
+- Pending reads are also invalidated by wheel intent and observed external motion, even if a jog/program finishes before the response arrives. Idle no-op reports and unit-normalized equivalent positions do not invalidate them; ordinary jog tracking is unchanged.
+
 ## [3.2.8] - 2026-11-02
 
 ### Added

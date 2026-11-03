@@ -103,12 +103,11 @@
     <details id="pendantSettings">
       <summary>Pendant settings</summary>
       <div class="row">
-        <label class="field">Probe plate mm<input id="thickness" type="number" min="0" step="0.01" value="20" /></label>
         <label class="field">Spindle increment (RPM)<input id="spindleIncrement" type="number" min="1" value="100" /></label>
         <label class="field"><span id="largeStepsLabel">5/10 steps (waiting for G20/G21)</span><select id="largeSteps" aria-describedby="largeStepsHelp"><option value="disabled">Disabled</option><option value="enabled">Enabled</option></select></label>
       </div>
       <p id="largeStepsHelp" class="settings-help">Step mode only. Right-dial 5 and 10 move 5 or 10 of the active unit per detent at the axis's full <code>$110</code>–<code>$112</code> rate: 5/10 mm under G21, 127/254 mm under G20. Continuous, MPG, and Lead ignore this setting. Selector 1 is always allowed: 1 in (25.4 mm) per detent under G20.</p>
-      <p class="settings-help">Changes save automatically. Probe plate thickness is always millimetres, even under G20.</p>
+      <p class="settings-help">Changes save automatically. Safe-Z, W-Home, and Probe-Z use the shared CNCjs Tool widget settings, not pendant settings.</p>
     </details>
     <details id="macroSettings">
       <summary>Macro buttons</summary>
@@ -131,16 +130,17 @@
           <dt>Feed+ / Feed-</dt><dd><b>Press:</b> feed override +1% / −1% (10–200%), also during a program.</dd><dd><b>Fn:</b> Macro-1 / Macro-2.</dd>
           <dt>Spindle+ / Spindle-</dt><dd><b>Press:</b> spindle override +1% / −1% (10–200%), also during a program.</dd><dd><b>Fn (printed Macro-3 / Macro-4):</b> programmed S speed ± Spindle increment, limited by <code>$30</code>/<code>$31</code>; idle only.</dd>
           <dt>M-Home</dt><dd><b>Press:</b> GRBL homing (<code>$H</code>); idle or Alarm only.</dd><dd><b>Fn:</b> Macro-5.</dd>
-          <dt>Safe-Z</dt><dd><b>Press:</b> <code>G21 G53 G0 G90 Z-5</code> (rapid to machine Z −5 mm).</dd><dd><b>Fn:</b> Macro-6.</dd>
-          <dt>W-Home</dt><dd><b>Press:</b> <code>G21 G53 G0 G90 Z-5</code>, then <code>G21 G54 G0 G90 X0 Y0</code>; Z stays at machine −5 mm.</dd><dd><b>Fn:</b> Macro-7.</dd>
+          <dt>Safe-Z</dt><dd><b>Press:</b> reads CNCjs Tool's tool-change position, then <code>G21 G53 G0 G90 Z</code>(toolChangeZ in mm).</dd><dd><b>Fn:</b> Macro-6.</dd>
+          <dt>W-Home</dt><dd><b>Press:</b> same machine-Z move as Safe-Z, then <code>G21 G54 G0 G90 X0 Y0</code>; no final Z move.</dd><dd><b>Fn:</b> Macro-7.</dd>
           <dt>S on/off</dt><dd><b>Press:</b> <code>M5</code> if the spindle runs; otherwise <code>M3</code> (or <code>M4</code> after Fn+S on/off) when S is positive.</dd><dd><b>Fn (printed Macro-8):</b> switches the next start between <code>M3</code> and <code>M4</code>; spindle must be stopped.</dd>
-          <dt>Probe-Z</dt><dd><b>Press:</b> <code>G21 G91</code>, <code>G38.2 Z-50 F120</code>, <code>G10 L20 P1 Z</code>(Probe plate mm + 0.001), <code>G0 Z3</code>, <code>G90</code>.</dd><dd><b>Fn:</b> Macro-9.</dd>
+          <dt>Probe-Z</dt><dd><b>Press:</b> reads CNCjs Tool's touch plate height, then <code>G21 G91</code>, <code>G38.2 Z-50 F120</code>, <code>G10 L20 P1 Z</code>(touchPlateHeight in mm + 0.001), <code>G0 Z3</code>, <code>G90</code>.</dd><dd><b>Fn:</b> Macro-9.</dd>
           <dt>Continuous</dt><dd><b>Press:</b> Continuous mode.</dd><dd><b>Fn:</b> flood coolant toggle: <code>M8</code>; off sends <code>M9</code>, then <code>M7</code> if mist stays on.</dd>
           <dt>Step</dt><dd><b>Press:</b> Step mode.</dd><dd><b>Fn:</b> mist coolant toggle: <code>M7</code>; off sends <code>M9</code>, then <code>M8</code> if flood stays on.</dd>
           <dt>Macro-10</dt><dd><b>Press:</b> toggles the pendant LCD between work (X1/Y1/Z1) and machine (X/Y/Z) coordinates; sends nothing to the controller.</dd><dd><b>Fn:</b> Macro-10 macro; unassigned by default.</dd>
           <dt>Fn</dt><dd>Modifier only.</dd>
         </dl>
         <p>An unassigned macro combination only logs that it is not configured; a Disabled one logs that it is disabled. Macros, homing, spindle, and coolant commands need an idle controller with no running program. Safe-Z, W-Home, and Probe-Z select G21 and leave the controller in millimetres; W-Home also leaves G54 active, and Probe-Z always sets the G54 Z offset.</p>
+        <p>Each press reads the server's current Tool settings. Unset values default to 0, matching CNCjs; 0 is not a safety guarantee. Verify the tool-change machine Z against your machine and workholding. Invalid values or a failed read send no motion. Stop, another key, disconnect, or a controller state change cancels a pending read.</p>
       </details>
     </details>
     <details>
