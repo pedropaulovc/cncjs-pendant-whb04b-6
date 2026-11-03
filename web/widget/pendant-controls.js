@@ -106,7 +106,7 @@ export class PendantControls {
       1: () => this.grbl.reset(), 2: () => this.grbl.stop(), 3: () => this.grbl.startPause(),
       4: () => this.grbl.override('feed', 1), 5: () => this.grbl.override('feed', -1),
       6: () => this.grbl.override('spindle', 1), 7: () => this.grbl.override('spindle', -1),
-      8: () => this.grbl.homing(), 9: () => this.onClearance(false), 10: () => this.onClearance(true),
+      8: () => this.grbl.homing(), 9: () => this.onClearance('safe-z'), 10: () => this.onClearance('work-home'),
       11: () => this.grbl.spindleToggle(), 13: () => this.onProbe(),
       14: () => this.setMode('continuous'), 15: () => this.setMode('step'),
       16: () => { this.coordinates = this.coordinates === 'work' ? 'machine' : 'work'; this.onCoordinates(this.coordinates); this.log(`Display: ${this.coordinates} coordinates.`); },

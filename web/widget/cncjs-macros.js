@@ -6,7 +6,7 @@ export class CncjsMacros {
     this.notice = '';
   }
 
-  async request(path, { label = 'CNCjs macros', allowEmpty = false } = {}) {
+  async request(path, { label = 'CNCjs macros', format = 'json' } = {}) {
     const token = this.getToken?.();
     if (typeof token !== 'string' || !token) throw new Error(`${label}: waiting for a session token.`);
     let response;
@@ -24,7 +24,7 @@ export class CncjsMacros {
     if (response.status === 404 && path.startsWith('/api/macros/')) throw new Error('CNCjs macro no longer exists. Refresh the macro list.');
     if (!response.ok) throw new Error(`${label}: HTTP ${response.status}.`);
     try {
-      if (!allowEmpty) return await response.json();
+      if (format === 'json') return await response.json();
       const body = await response.text();
       // Native GET /api/tool sends an empty 200 body when the tool store is unset.
       return body === '' ? {} : JSON.parse(body);
@@ -58,10 +58,11 @@ export class CncjsMacros {
 
   readToolChangeZ() { return this.readToolNumber('toolChangeZ'); }
 
-  readTouchPlateHeight() { return this.readToolNumber('touchPlateHeight', true); }
+  readTouchPlateHeight() { return this.readToolNumber('touchPlateHeight'); }
 
-  async readToolNumber(key, nonnegative = false) {
-    const tool = await this.request('/api/tool', { label: 'CNCjs tool settings', allowEmpty: true });
+  async readToolNumber(key) {
+    const nonnegative = key === 'touchPlateHeight';
+    const tool = await this.request('/api/tool', { label: 'CNCjs tool settings', format: 'tool-settings' });
     if (!tool || typeof tool !== 'object' || Array.isArray(tool)) throw new Error('CNCjs tool settings: invalid tool record.');
     if (!Object.hasOwn(tool, key)) return 0;
     const value = tool[key];

@@ -18,7 +18,8 @@ export class SavedMacroRunner {
     });
   }
 
-  runClearance(workHome = false) {
+  runClearance(action = 'safe-z') {
+    const workHome = action === 'work-home';
     return this.execute(workHome ? 'W-Home' : 'Safe-Z', async () => {
       const z = await this.library.readToolChangeZ();
       const content = [`G21 G53 G0 G90 Z${decimal(z)}`];

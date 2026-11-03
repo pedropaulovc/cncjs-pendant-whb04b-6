@@ -128,7 +128,7 @@ const savedMacroRunner = new SavedMacroRunner({ session, grbl, library: macroLib
 const controls = new PendantControls(grbl, {
   log,
   onSavedMacro: id => savedMacroRunner.run(id),
-  onClearance: workHome => savedMacroRunner.runClearance(workHome),
+  onClearance: action => savedMacroRunner.runClearance(action),
   onProbe: () => savedMacroRunner.runProbe(),
   onSuspend: () => savedMacroRunner.cancel(),
   onMode() { onControllerState('Grbl', session.state); },

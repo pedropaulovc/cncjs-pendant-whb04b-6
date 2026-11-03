@@ -19,7 +19,7 @@ function fixture() {
     macro: code => { commands.push(code); return 'sent'; }, cancelJog() {}, stop() { commands.push('STOP'); } };
   const runner = new SavedMacroRunner({ session, grbl, library, log: message => logs.push(message) });
   const controls = new PendantControls(grbl, { onSuspend: () => runner.cancel(),
-    onClearance: home => runner.runClearance(home), onProbe: () => runner.runProbe() });
+    onClearance: action => runner.runClearance(action), onProbe: () => runner.runProbe() });
   return { calls, commands, logs, session, grbl, library, runner, controls,
     setToken: value => { token = value; }, setBody: value => { body = value; },
     setStatus: value => { status = value; }, setFailure: value => { fail = value; },
@@ -29,7 +29,7 @@ function fixture() {
 const actions = [
   { name: 'Safe-Z', key: 9, run: f => f.runner.runClearance(), field: 'toolChangeZ',
     expected: z => [`G21 G53 G0 G90 Z${z}`] },
-  { name: 'W-Home', key: 10, run: f => f.runner.runClearance(true), field: 'toolChangeZ',
+  { name: 'W-Home', key: 10, run: f => f.runner.runClearance('work-home'), field: 'toolChangeZ',
     expected: z => [`G21 G53 G0 G90 Z${z}`, 'G21 G54 G0 G90 X0 Y0'] },
   { name: 'Probe-Z', key: 13, run: f => f.runner.runProbe(), field: 'touchPlateHeight',
     expected: z => ['G21 G91', 'G38.2 Z-50 F120', `G10 L20 P1 Z${z + 0.001}`, 'G0 Z3', 'G90'] },

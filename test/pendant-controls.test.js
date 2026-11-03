@@ -341,14 +341,14 @@ test('button actions fire on physical press only, with Fn in either key byte', (
 
 test('clearance and probe actions dispatch once per physical press', () => {
   const f = fixture(), actions = [];
-  f.controls.onClearance = workHome => actions.push(['clearance', workHome]);
+  f.controls.onClearance = action => actions.push(['clearance', action]);
   f.controls.onProbe = () => actions.push(['probe']);
   for (const code of [9, 10, 13]) {
     f.input({ firstKeyCode: code });
     f.input({ firstKeyCode: code });
     f.input({});
   }
-  assert.deepEqual(actions, [['clearance', false], ['clearance', true], ['probe']]);
+  assert.deepEqual(actions, [['clearance', 'safe-z'], ['clearance', 'work-home'], ['probe']]);
   assert.deepEqual(f.commands, []);
 });
 
