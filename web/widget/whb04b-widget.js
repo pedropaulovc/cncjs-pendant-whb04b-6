@@ -1,5 +1,6 @@
 // whb04b-widget.js
-// CNCjs custom-widget integration for the WHB04B-6 pendant over WebHID.
+// CNCjs custom-widget integration for the WHB04B-6 pendant over WebHID or the
+// native HID sidecar (Pendant settings > Pendant link).
 //
 // Runs inside a same-origin CNCjs custom-widget iframe. It does NOT manage the
 // serial connection (the CNCjs app already owns it); it reuses the app's
@@ -16,9 +17,8 @@
 // socket.io is loaded from the same-origin /socket.io/socket.io.js so the
 // client version always matches the CNCjs server (2.x).
 
-import {
-  WHB04BWebHID, buildDisplayFrame, JogMode,
-} from '../whb04b-webhid.js';
+import { WHB04BWebHID, buildDisplayFrame, JogMode } from '../whb04b-webhid.js';
+import { LINK_KEY, DEFAULT_LINK, parseLink, createPendant, hiddenTabPolicy, connectLabel, linkPill, linkMessage } from './pendant-link.js';
 import { CncjsSession, isParentMessage } from './cncjs-session.js';
 import { Grbl } from './grbl.js';
 import { PendantControls, CONFIG_KEY, parseConfig } from './pendant-controls.js';
@@ -108,7 +108,9 @@ function setPill(id, on, text) {
 //---------------------------------------------------------------------------
 // Main
 //---------------------------------------------------------------------------
-const pendant = new WHB04BWebHID();
+let link = DEFAULT_LINK;
+let pendant = null;
+let pendantEpoch = 0;
 const session = new CncjsSession({
   io: (...args) => io(...args),
   origin: location.origin,
@@ -159,7 +161,7 @@ let displayError = '';
 let displayNotice = '';
 async function onControllerState(type, state) {
   refreshJogUI();
-  if (!pendant.connected) return;
+  if (!pendant?.connected) return;
   try {
     const unsupportedAxes = [0x14, 0x15, 0x16].includes(controls.axisCode);
     const unavailable = session.status.phase !== 'joined' || unsupportedAxes;
@@ -182,7 +184,8 @@ async function onControllerState(type, state) {
 
 function handleInput(d) {
   const previousAxis = controls.axisCode;
-  if (!document.hidden) controls.handleInput(d);
+  // WebHID loses the pendant while hidden; the sidecar keeps jogging.
+  if (!document.hidden || hiddenTabPolicy(link.transport) === 'keep-working') controls.handleInput(d);
   if (previousAxis !== controls.axisCode) onControllerState('Grbl', session.state);
 
   // mirror to UI
@@ -192,16 +195,87 @@ function handleInput(d) {
   $('jog').textContent = String(d.jog);
 }
 
+function refreshPendantPill() {
+  const { on, text } = linkPill(link.transport, pendant);
+  setPill('hidPill', on, text);
+}
+
+function releasePendantInput() { controls.suspend(); grbl.clearOverrides(); controls.keys.clear(); }
+
+// Listeners ignore a transport that has since been replaced.
+function startPendant() {
+  const current = createPendant(link);
+  pendant = current;
+  const own = handler => (e) => { if (pendant === current) handler(e); };
+  current.addEventListener('attach', own(() => {
+    refreshPendantPill();
+    log(link.transport === 'sidecar' ? `Pendant connected through sidecar${current.version ? ` ${current.version}` : ''}.` : 'Pendant connected.');
+    onControllerState('Grbl', session.state);
+  }));
+  current.addEventListener('remove', own(() => { releasePendantInput(); refreshPendantPill(); log('Pendant removed.'); }));
+  current.addEventListener('use', own(e => handleInput(e.detail)));
+  current.addEventListener('link', own((e) => {
+    refreshPendantPill();
+    const message = linkMessage(e.detail);
+    if (message) log(message);
+  }));
+  const webhidMissing = link.transport === 'webhid' && !WHB04BWebHID.isSupported();
+  $('connect').textContent = connectLabel(link.transport);
+  $('connect').disabled = webhidMissing;
+  $('sidecarUrlField').hidden = link.transport !== 'sidecar';
+  refreshPendantPill();
+  if (webhidMissing) { log('WebHID unavailable: use Chrome/Edge over https or localhost, or select the Sidecar pendant link.'); return; }
+  // Re-attach to an already-authorised WebHID pendant without a prompt, or
+  // connect to the sidecar.
+  current.tryReconnect().then(ok => ok && link.transport === 'webhid' && log('Re-attached to authorised pendant.')).catch(() => {});
+}
+
+async function switchPendant(next) {
+  const epoch = ++pendantEpoch;
+  const previous = pendant;
+  link = next;
+  releasePendantInput();
+  displayError = '';
+  try { await previous.destroy(); } catch { /* the replacement reports its own state */ }
+  if (epoch === pendantEpoch) startPendant();
+}
+
 function wireUI() {
   $('connect').onclick = async () => {
+    if (link.transport === 'sidecar') { pendant.connect(link.sidecarUrl); return; }
     try { if (!await pendant.requestDevice()) log('No pendant selected.'); }
     catch (err) { log('Pendant error: ' + err.message); }
   };
   $('reconnectSock').onclick = () => { readParentStore(); refreshCtxUI(); connectSocket(); };
   try { controls.setConfig(parseConfig(JSON.parse(localStorage.getItem(CONFIG_KEY) || '{}'))); }
   catch (error) { log(`Pendant settings: ${error.message}`); }
+  try { link = parseLink(JSON.parse(localStorage.getItem(LINK_KEY) || '{}')); }
+  catch (error) { log(`Pendant link: ${error.message}`); }
   wireHelpToggle($('modeHelpToggle'), $('modeHelp'));
   const settingsStatus = $('settingsStatus');
+  const saved = () => {
+    settingsStatus.dataset.state = 'saved';
+    settingsStatus.textContent = 'Settings saved automatically for this browser and CNCjs address.';
+  };
+  const rejected = (error) => {
+    settingsStatus.dataset.state = 'error';
+    settingsStatus.textContent = `Not saved: ${error.message}`;
+  };
+  // The link has its own storage key; a transport change replaces the driver.
+  const saveLink = () => {
+    let next;
+    try { next = parseLink({ transport: $('transport').value, sidecarUrl: $('sidecarUrl').value.trim() }); }
+    catch (error) { rejected(error); return; }
+    const serialized = JSON.stringify(next);
+    if (serialized !== localStorage.getItem(LINK_KEY)) localStorage.setItem(LINK_KEY, serialized);
+    saved();
+    const replace = next.transport !== link.transport || (next.transport === 'sidecar' && next.sidecarUrl !== link.sidecarUrl);
+    if (replace) { switchPendant(next); return; }
+    link = next;
+  };
+  $('transport').value = link.transport;
+  $('sidecarUrl').value = link.sidecarUrl;
+  for (const id of ['transport', 'sidecarUrl']) $(id).addEventListener('change', saveLink);
   // Every edit saves at once. An invalid draft stays on screen with its error
   // but never replaces the last valid saved configuration.
   const save = () => {
@@ -214,11 +288,9 @@ function wireUI() {
       const serialized = JSON.stringify(value);
       if (serialized !== localStorage.getItem(CONFIG_KEY)) localStorage.setItem(CONFIG_KEY, serialized);
       controls.setConfig(value);
-      settingsStatus.dataset.state = 'saved';
-      settingsStatus.textContent = 'Settings saved automatically for this browser and CNCjs address.';
+      saved();
     } catch (error) {
-      settingsStatus.dataset.state = 'error';
-      settingsStatus.textContent = `Not saved: ${error.message}`;
+      rejected(error);
     }
   };
   macroSettings = new MacroSettings({ container: $('macroAssignments'), status: $('macroStatus'),
@@ -237,23 +309,13 @@ function boot() {
   listenParentMessages(refreshCtxUI);
   refreshCtxUI();
 
-  pendant.addEventListener('attach', () => { setPill('hidPill', true, 'pendant ready'); log('Pendant connected.'); onControllerState('Grbl', session.state); });
-  pendant.addEventListener('remove', () => { controls.suspend(); grbl.clearOverrides(); controls.keys.clear(); setPill('hidPill', false, 'pendant offline'); log('Pendant removed.'); });
-  pendant.addEventListener('use', (e) => handleInput(e.detail));
-
-  // Re-attach to an already-authorised pendant without a prompt.
-  pendant.tryReconnect().then((ok) => ok && log('Re-attached to authorised pendant.')).catch(() => {});
+  startPendant();
 
   // Connect the socket using parent creds.
   connectSocket();
-
-  if (!WHB04BWebHID.isSupported()) {
-    $('connect').disabled = true;
-    log('WebHID unavailable: use Chrome/Edge over https or localhost.');
-  }
 }
 
 document.addEventListener('DOMContentLoaded', boot);
 window.addEventListener('pagehide', () => { controls.suspend(); grbl.clearOverrides(); grbl.clearJog(); session.disconnect(); });
-document.addEventListener('visibilitychange', () => { if (document.hidden) controls.suspend(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden && hiddenTabPolicy(link.transport) === 'suspend') controls.suspend(); });
 

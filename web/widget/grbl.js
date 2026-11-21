@@ -18,6 +18,7 @@ export class Grbl {
     Object.assign(this, { session, log, schedule, cancel, now });
     this.pendingOverrides = new Map();
     this.overrideTimer = null;
+    this.overrideUnsubscribe = null;
     this.jogPhase = 'idle';
     this.jogGeneration = null;
     this.jogEpoch = null;
@@ -36,7 +37,7 @@ export class Grbl {
     this.jogShortNotice = 'none';
     this.jogAxis = null;
     this.jogBacklog = null;
-    this.backlogTimer = null;
+    this.backlogUnsubscribe = null;
     this.spindleDirectionMode = 'M3';
   }
   get state() { return this.session.state || {}; }
@@ -66,6 +67,8 @@ export class Grbl {
   clearOverrides() {
     if (this.overrideTimer !== null) this.cancel(this.overrideTimer);
     this.overrideTimer = null;
+    this.overrideUnsubscribe?.();
+    this.overrideUnsubscribe = null;
     this.pendingOverrides.clear();
   }
   overrideTarget(kind, target) {
@@ -102,7 +105,7 @@ export class Grbl {
         continue;
       }
       const current = this.session.overrides?.[kind === 'feed' ? 0 : 2];
-      if (pending.expected !== null && (this.session.overrideSequence <= pending.sequence || current !== pending.expected)) continue;
+      if (pending.expected !== null && !this.overrideConfirmed(kind, pending)) continue;
       if (current === pending.target) { this.pendingOverrides.delete(kind); continue; }
       const difference = pending.target - current;
       const amount = Math.sign(difference) * (Math.abs(difference) >= 10 ? 10 : 1);
@@ -111,9 +114,18 @@ export class Grbl {
       pending.sequence = this.session.overrideSequence;
       pending.deadline = this.now() + 3000;
     }
-    if (!this.pendingOverrides.size) return;
+    if (!this.pendingOverrides.size) { this.clearOverrides(); return; }
     this._cmd('statusreport');
     this.overrideTimer = this.schedule(() => this.flushOverrides(), 250);
+    // Continue from each confirming Ov report as it arrives. The 250 ms poll
+    // alone would run at most once per second in a hidden tab (once a minute
+    // after five minutes), outliving the 3 s confirmation deadline.
+    this.overrideUnsubscribe ??= this.session.subscribeMotion(() => {
+      if ([...this.pendingOverrides].some(([kind, pending]) => pending.expected !== null && this.overrideConfirmed(kind, pending))) this.flushOverrides();
+    });
+  }
+  overrideConfirmed(kind, pending) {
+    return this.session.overrideSequence > pending.sequence && this.session.overrides?.[kind === 'feed' ? 0 : 2] === pending.expected;
   }
   homing() {
     if (!this.manualReady() && this.activeState !== 'Alarm') return this.refuse('Homing: stop the program and motion first.');
@@ -233,8 +245,8 @@ export class Grbl {
     this.jogUnsubscribe = null;
   }
   dropBacklog() {
-    if (this.backlogTimer !== null) this.cancel(this.backlogTimer);
-    this.backlogTimer = null;
+    this.backlogUnsubscribe?.();
+    this.backlogUnsubscribe = null;
     this.jogBacklog = null;
   }
   // CNCjs's feeder writes a lone queued line at once, without waiting for the
@@ -249,17 +261,17 @@ export class Grbl {
     // it. A modal unit change must not reinterpret already requested detents.
     const total = (this.jogBacklog?.distance ?? 0) + distance;
     this.jogBacklog = { axis, distance: total, feed };
-    if (this.jogAwaitingReply()) { this.flushBacklog(); return 'buffered'; }
+    if (this.jogAwaitingReply()) { this.watchBacklog(); return 'buffered'; }
     return this.sendBacklog();
   }
-  flushBacklog() {
-    if (this.backlogTimer !== null) return;
-    this.backlogTimer = this.schedule(() => {
-      this.backlogTimer = null;
-      if (!this.jogBacklog) return;
-      if (this.jogAwaitingReply()) { this.flushBacklog(); return; }
-      this.sendBacklog();
-    }, 50);
+  // The reply and modal units arrive as socket messages. Release the merge from
+  // those messages, never from a timer: hidden tabs delay timers by at least
+  // 1 s (up to 1 min), which would start the merged motion that late.
+  watchBacklog() {
+    if (this.backlogUnsubscribe) return;
+    this.backlogUnsubscribe = this.session.subscribeMotion(() => {
+      if (this.jogBacklog && !this.jogAwaitingReply()) this.sendBacklog();
+    });
   }
   // Only the controller's reply to the line a backlog waited behind releases
   // it. A reset, program, Stop, or rejection ends that motion session, and the
@@ -286,7 +298,7 @@ export class Grbl {
         this.log('Step: queued wheel input retained; waiting for known G20/G21 program units.');
         backlog.waitingUnits = true;
       }
-      this.flushBacklog();
+      this.watchBacklog();
       return 'buffered';
     }
     this.dropBacklog();

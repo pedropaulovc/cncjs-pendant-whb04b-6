@@ -19,3 +19,24 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm test
       - run: npm run pack:check
+  sidecar:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+      - name: Test sidecar
+        run: dotnet test sidecar
+      - name: Publish single-file exe
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          dotnet publish sidecar/Whb04bSidecar -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:Version=$version -o publish
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Whb04bSidecar
+          path: publish/Whb04bSidecar.exe

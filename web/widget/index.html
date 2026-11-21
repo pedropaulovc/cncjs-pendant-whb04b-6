@@ -40,6 +40,7 @@
   .settings-status[data-state="error"] { color: #a94442; }
   .settings-status[data-state="warning"] { color: #8a6d3b; }
   #macroSettings > :is(.settings-help, .settings-status), #pendantSettings > .settings-help { margin: 4px 0; }
+  #sidecarUrl { width: 17rem; }
   #macroAssignments { display: grid; gap: 6px; margin: 8px 0; }
   .macro-assignment { min-width: 0; margin: 0; padding: 6px; border: 1px solid #ddd; border-radius: 3px; }
   .macro-assignment legend { padding: 0 4px; font-size: 12px; font-weight: 600; }
@@ -102,6 +103,11 @@
   <div class="panels">
     <details id="pendantSettings">
       <summary>Pendant settings</summary>
+      <div class="row">
+        <label class="field">Pendant link<select id="transport" aria-describedby="linkHelp"><option value="webhid">WebHID</option><option value="sidecar">Sidecar</option></select></label>
+        <label id="sidecarUrlField" class="field" hidden>Sidecar URL<input id="sidecarUrl" type="url" spellcheck="false" autocomplete="off" /></label>
+      </div>
+      <p id="linkHelp" class="settings-help"><b>WebHID</b> reads the pendant in this browser tab; it stops while the browser window is unfocused or the tab is hidden. <b>Sidecar</b> uses the WHB04B sidecar app on this computer (default <code>ws://127.0.0.1:17104/whb04b</code>) and keeps jogging while CNCjs is in the background. One widget owns the sidecar at a time: the newest takes over, and Connect sidecar takes it back.</p>
       <div class="row">
         <label class="field">Spindle increment (RPM)<input id="spindleIncrement" type="number" min="1" value="100" /></label>
         <label class="field"><span id="largeStepsLabel">5/10 steps (waiting for G20/G21)</span><select id="largeSteps" aria-describedby="largeStepsHelp"><option value="disabled">Disabled</option><option value="enabled">Enabled</option></select></label>

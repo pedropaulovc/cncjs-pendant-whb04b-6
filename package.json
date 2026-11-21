@@ -8,7 +8,7 @@
     "cnc",
     "webhid"
   ],
-  "version": "3.2.9",
+  "version": "3.3.0",
   "license": "MIT",
   "contributors": [
     "Jim Derry <balthisar@gmail.com>",
@@ -36,6 +36,11 @@
       "types": "./web/whb04b-webhid.d.ts",
       "import": "./web/whb04b-webhid.js",
       "default": "./web/whb04b-webhid.js"
+    },
+    "./sidecar": {
+      "types": "./web/whb04b-sidecar.d.ts",
+      "import": "./web/whb04b-sidecar.js",
+      "default": "./web/whb04b-sidecar.js"
     },
     "./widget/whb04b-widget.js": "./web/widget/whb04b-widget.js",
     "./widget/index.html": "./web/widget/index.html",

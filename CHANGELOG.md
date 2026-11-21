@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented here.
 
+## [3.3.0] - 2026-11-20
+
+### Added
+
+- **Sidecar link (Windows).** `Whb04bSidecar.exe` is a self-contained .NET 10 tray app attached to each GitHub release. It owns the WHB04B-6 receiver through the native Windows HID API and relays raw input reports and LCD frames to the widget over `ws://127.0.0.1:17104/whb04b`. The browser no longer holds the device, so the pendant keeps working when the CNCjs window loses focus. The sidecar listens on loopback only, accepts `localhost`/`127.0.0.1`/`[::1]` pages plus origins added with `--allow-origin` or `settings.json`, gives the pendant to the newest widget, and logs attach/detach, clients and LCD latency to `%LOCALAPPDATA%\WHB04B-Sidecar\logs`. `--simulate` replaces the USB device with a simulated pendant for practice and tests. See `sidecar/README.md`.
+- **Pendant link** setting (WebHID or Sidecar) and sidecar URL in **Pendant settings**, saved per browser and CNCjs address. Sidecar mode connects on its own, reconnects with backoff when the sidecar restarts, and reports `sidecar not running`, `pendant not plugged in`, `claimed by another widget` or `pendant ready (sidecar)`. A widget whose pendant was taken by a newer widget does not reconnect on its own; **Connect sidecar** takes it back.
+- `WHB04BSidecar` driver (`cncjs-pendant-whb04b-6/sidecar`) with the same events and LCD queue semantics as `WHB04BWebHID`.
+
+### Changed
+
+- In Sidecar mode the widget keeps handling the pendant while its tab is hidden or the window is minimized. WebHID mode still suspends then.
+- Work that waited on timers now also advances from controller messages, because Chrome delays timers in hidden tabs to once per second (once per minute after five minutes):
+  - Merged Step detents go out as soon as the controller's `ok` arrives instead of on a 50 ms poll. The total distance is unchanged, but the split between `$J` lines can differ.
+  - Each override step continues when its confirming `Ov` report arrives instead of on a 250 ms poll, so confirmed changes are no longer dropped at the 3 s deadline.
+  - A Continuous jog also stops when a status report shows the wheel has paused, not only from its 180 ms timer.
+  - Stop and feed-hold confirmation request a status report on entering each phase and on controller state changes (at most every 250 ms), instead of polling every 250 ms.
+
 ## [3.2.9] - 2026-11-02
 
 ### Changed
