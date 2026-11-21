@@ -75,8 +75,9 @@ export function parseInput(bytes) {
 }
 
 export class WHB04BWebHID extends EventTarget {
-  constructor() {
+  constructor({ schedule = (fn, ms) => setTimeout(fn, ms), cancel = id => clearTimeout(id) } = {}) {
     super();
+    Object.assign(this, { schedule, cancel });
     this.device = null;
     this.connected = false;
     this._previous = null;
@@ -243,7 +244,7 @@ export class WHB04BWebHID extends EventTarget {
         await Promise.race([
           device.sendFeatureReport(OUTPUT_REPORT_ID, chunk),
           new Promise((_, reject) => {
-            timer = setTimeout(() => {
+            timer = this.schedule(() => {
               // Stop this connection before any further chunks can be sent.
               if (epoch === this._displayEpoch && device === this.device) {
                 this._closeDevice(device).catch(() => {});
@@ -253,7 +254,7 @@ export class WHB04BWebHID extends EventTarget {
             }, 1000);
           }),
         ]);
-      } finally { clearTimeout(timer); }
+      } finally { if (timer !== undefined) this.cancel(timer); }
     }
   }
 

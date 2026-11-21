@@ -1,17 +1,25 @@
-# WHB04B-6 CNC Pendant for CNCjs (WebHID)
+# WHB04B-6 CNC Pendant for CNCjs (WebHID or native sidecar)
 
 A WebHID driver and CNCjs custom widget for the WHB04B-6 wireless USB pendant.
-It runs entirely in the browser — there is no Node process to install and no
-native HID module to compile. The pendant talks to the device through
-`navigator.hid` and drives the machine through CNCjs's existing socket session.
+The widget reaches the pendant in one of two ways:
+
+- **WebHID**: through `navigator.hid` in the browser tab. Nothing to install,
+  but the browser drops the pendant when the window loses focus.
+- **Sidecar** (Windows): through `Whb04bSidecar.exe`, a tray app that owns the
+  USB receiver through the native Windows HID API and relays it to the widget
+  over a loopback WebSocket. The pendant keeps working while CNCjs is unfocused,
+  hidden, or minimized.
+
+Either way the widget drives the machine through CNCjs's existing socket session;
+all jog and macro logic lives in the widget.
 
 ## Requirements
 
-- A Chromium-based browser (Chrome, Edge, or Opera) — WebHID is not available in
-  Firefox or Safari.
-- A secure context: `https://` or `localhost`.
 - The WHB04B-6 pendant and its USB receiver (VID `0x10CE`, PID `0xEB93`).
-- On Linux, a udev/hidraw rule so the browser can open the device.
+- WebHID link: a Chromium-based browser (Chrome, Edge, or Opera) in a secure
+  context (`https://` or `localhost`); on Linux, a udev/hidraw rule so the
+  browser can open the device.
+- Sidecar link: Windows x64. The `.exe` is self-contained; no .NET install needed.
 
 Only grbl is wired up today. Other controllers are welcome as contributions.
 
@@ -21,9 +29,12 @@ Only grbl is wired up today. Other controllers are welcome as contributions.
 web/
   index.html          standalone tester page
   whb04b-webhid.js    dependency-free WebHID driver (ES module)
+  whb04b-sidecar.js   same driver surface over the sidecar's WebSocket
   widget/
     index.html        CNCjs custom-widget page
     whb04b-widget.js  widget integration (creds from parent, grbl mapping)
+    pendant-link.js   WebHID / Sidecar selection
+sidecar/              Whb04bSidecar.exe (.NET 10 tray app), see sidecar/README.md
 ```
 
 ## Install from npm
@@ -64,11 +75,40 @@ the `~/.cncrc` secret.
 2. In the CNCjs UI: **Manage Widgets → add a custom widget**, set the URL to
    `/whb04b/widget/index.html`. Mount the whole `web` folder because the widget
    imports the driver from its parent directory.
-3. Open the widget and click **Connect pendant** once to grant WebHID access.
+3. Open the widget and click **Connect pendant** once to grant WebHID access,
+   or switch to the sidecar link (next section).
 
 The widget reads the CNCjs token and active serial port from the parent frame,
 maps the pendant's keys, dials, and jog wheel to grbl commands, and mirrors the
 machine coordinates to the pendant LCD.
+
+### Sidecar link (Windows)
+
+1. Download `Whb04bSidecar.exe` from the
+   [GitHub release](https://github.com/pedropaulovc/cncjs-pendant-whb04b-6/releases)
+   matching the widget version and run it. A tray icon shows the status: gray
+   means no pendant, amber means pendant found but no widget connected, green
+   means relaying. Its menu has **Start at login**, **Open log folder** and
+   **Quit**.
+2. In the widget, open **Pendant settings** and set **Pendant link** to
+   **Sidecar**. The default URL `ws://127.0.0.1:17104/whb04b` matches the
+   sidecar's default port. The choice is saved per browser and CNCjs address.
+3. The widget connects on its own and reconnects if the sidecar restarts. The
+   pendant pill says `sidecar not running`, `pendant not plugged in`, or
+   `pendant ready (sidecar)`.
+
+In Sidecar mode the widget keeps handling the pendant while its tab is hidden or
+the window is minimized. In WebHID mode it suspends then, as before.
+
+One widget owns the sidecar at a time; the newest connection takes over. The
+widget it replaced shows `claimed by another widget` and does not reconnect on
+its own; **Connect sidecar** takes the pendant back.
+
+The sidecar listens on loopback only and accepts browser pages served from
+`localhost`, `127.0.0.1` or `[::1]`. If you open CNCjs under another host name,
+start it with `--allow-origin http://that-host:8000` or add the origin to
+`allowedOrigins` in `%LOCALAPPDATA%\WHB04B-Sidecar\settings.json`. Flags,
+logs, the wire protocol and build steps are in [sidecar/README.md](sidecar/README.md).
 
 The compact operating view uses CNCjs-like light controls, with connection status
 and one readout for mode, selected axis, rate/step selector, and wheel delta.

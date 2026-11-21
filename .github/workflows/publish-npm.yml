@@ -53,7 +53,9 @@ jobs:
           grep -q '[^[:space:]]' release-notes.md
 
   publish:
-    needs: validate-release
+    # npm publish is irreversible: only run once the sidecar exe built and tested,
+    # so a release never ships without its GitHub release asset.
+    needs: [validate-release, sidecar-exe]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -122,8 +124,42 @@ jobs:
 
           npm publish
 
+  sidecar-exe:
+    needs: validate-release
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Test sidecar
+        run: dotnet test sidecar
+
+      - name: Publish single-file exe
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          dotnet publish sidecar/Whb04bSidecar -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:Version=$version -o publish
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Whb04bSidecar
+          path: publish/Whb04bSidecar.exe
+
   create-release:
-    needs: [validate-release, publish]
+    needs: [validate-release, publish, sidecar-exe]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -157,14 +193,19 @@ jobs:
           test -s release-notes.md
           grep -q '[^[:space:]]' release-notes.md
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: Whb04bSidecar
+          path: release-assets
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           if gh release view "$RELEASE_TAG" --json id >/dev/null 2>&1; then
-            echo "GitHub Release $RELEASE_TAG already exists."
+            gh release upload "$RELEASE_TAG" release-assets/Whb04bSidecar.exe --clobber
             exit 0
           fi
 
-          gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file release-notes.md --verify-tag
+          gh release create "$RELEASE_TAG" release-assets/Whb04bSidecar.exe --title "$RELEASE_TAG" --notes-file release-notes.md --verify-tag

@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Whb04bSidecar.Tests/Whb04bSidecar.Tests.csproj" />
+  <Project Path="Whb04bSidecar/Whb04bSidecar.csproj" />
+</Solution>

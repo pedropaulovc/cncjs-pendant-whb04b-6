@@ -46,7 +46,14 @@ export interface InputReport {
 export function buildDisplayFrame(options?: DisplayFrameOptions): Uint8Array;
 export function parseInput(bytes: ArrayLike<number>): InputReport;
 
+export interface WHB04BWebHIDOptions {
+  /** Timer for the 1 s LCD feature-report timeout; defaults to setTimeout. */
+  schedule?: (callback: () => void, ms: number) => unknown;
+  cancel?: (id: unknown) => void;
+}
+
 export class WHB04BWebHID extends EventTarget {
+  constructor(options?: WHB04BWebHIDOptions);
   device: HIDDevice | null;
   connected: boolean;
 

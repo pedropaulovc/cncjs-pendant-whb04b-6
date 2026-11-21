@@ -4,13 +4,14 @@ import { CncjsSession, isParentMessage } from '../web/widget/cncjs-session.js';
 import { Grbl } from '../web/widget/grbl.js';
 
 
-function fixture() {
+function fixture({ now } = {}) {
   const emitted = [];
   const sockets = [];
   const timers = new Set();
   const states = [];
   const session = new CncjsSession({
     origin: 'http://localhost:8000',
+    ...(now ? { now } : {}),
     schedule(fn) { timers.add(fn); return fn; },
     cancel(fn) { timers.delete(fn); },
     onState: (...args) => states.push(args),
@@ -201,6 +202,33 @@ test('Stop uses fresh reports despite cached Idle, waits through Hold:1, then re
   report(f, 'Idle'); report(f, 'Idle');
   assert.equal(f.session.stopPhase, 'idle');
   assert.equal(f.timers.size, 1);
+});
+
+test('Stop asks for confirming reports from messages, not only its hidden-tab-throttled poll timer', () => {
+  let time = 0;
+  const f = fixture({ now: () => time }); f.join();
+  f.socket.receive('workflow:state', 'running');
+  f.session.stop();
+  const queries = () => stopCommands(f).filter(([name]) => name === 'statusreport').length;
+  assert.equal(queries(), 1);
+  report(f, 'Run');
+  assert.equal(queries(), 1, 'Decelerating motion is not polled in a tight loop');
+  time += 100; f.socket.receive('controller:state', 'Grbl', { status: { activeState: 'Hold:1' } });
+  assert.equal(queries(), 1, 'Changed CNCjs state within 250 ms of the last query waits');
+  time += 200; f.socket.receive('controller:state', 'Grbl', { status: { activeState: 'Hold:0' } });
+  assert.equal(queries(), 2, 'Changed CNCjs state requests a fresh report');
+  report(f, 'Hold:0');
+  assert.equal(queries(), 3, 'A confirmation phase asks for its confirming report at once');
+  report(f, 'Hold:0');
+  assert.equal(stopCommands(f).filter(([name]) => name === 'reset').length, 1);
+  f.socket.receive('serialport:read', "Grbl 1.1h ['$' for help]");
+  assert.equal(queries(), 4);
+  report(f, 'Idle');
+  assert.equal(queries(), 5);
+  report(f, 'Idle');
+  assert.equal(f.session.stopPhase, 'idle');
+  time += 1000; f.socket.receive('controller:state', 'Grbl', { status: { activeState: 'Idle' } });
+  assert.equal(queries(), 5, 'A completed Stop stops polling');
 });
 
 test('Stop cancels jogging without resetting and blocks motion while pending', () => {
@@ -594,7 +622,7 @@ test('out-and-back Steps merge until the controller acknowledges the first and c
   assert.equal(f.queries(),0,'A queued jog behind a dwell cannot query its way into completion');
   const gcode=()=>stopCommands(f).filter(([name])=>name==='gcode');
   const write=([,code,context])=>f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
-  f.tick(50); f.tick(50); f.tick(50);
+  f.advance(150);
   assert.equal(gcode().length,1,'Merged input waits while the first line is unsent');
   assert.equal(f.grbl.jogCompleted(),false);
   assert.equal(f.grbl.jogPhase,'active');
@@ -624,14 +652,14 @@ test('a fast wheel keeps one unacknowledged jog line in flight and preserves eve
   f.tick();
   assert.equal(gcode().length,1);
   f.socket.receive('serialport:read','ok');
-  // The first detent after the ok sends the merge at once; later ones wait again.
-  for(let i=0;i<5;i++) f.grbl.jog('X',0.1,250);
-  f.tick();
-  assert.deepEqual(gcode().map(([,code])=>code),['$J=G21 G91 X0.1000 F250.000','$J=G21 G91 X2.0000 F250.000']);
+  // The reply itself releases the merge, with no timer; later detents wait again.
+  assert.deepEqual(gcode().map(([,code])=>code),['$J=G21 G91 X0.1000 F250.000','$J=G21 G91 X1.9000 F250.000']);
+  assert.equal(f.jobs.size,0,'Releasing merged detents never depends on a hidden-tab-throttled timer');
+  for(let i=0;i<5;i++) assert.equal(f.grbl.jog('X',0.1,250),'buffered');
   write(gcode()[1]); f.tick();
   assert.equal(gcode().length,2);
   f.socket.receive('serialport:read','ok'); f.tick();
-  assert.equal(gcode().at(-1)[1],'$J=G21 G91 X0.4000 F250.000');
+  assert.equal(gcode().at(-1)[1],'$J=G21 G91 X0.5000 F250.000');
   assert.equal(f.grbl.jogTarget.value,2.5,'Every detent travels: 25 x 0.1 mm');
   for(let i=0;i<3;i++) f.grbl.jog('X',0.1,250);
   f.grbl.cancelJog();
@@ -651,10 +679,9 @@ for(const [event,trigger] of [
   const [,code,context]=gcode()[0];
   f.socket.receive('serialport:write',`${code}\n`,{...context,source:'feeder'});
   for(let i=0;i<20;i++) assert.equal(f.grbl.jog('X',0.1,250),'buffered');
-  const backlogTimer=f.grbl.backlogTimer;
   trigger(f);
-  // Even a captured callback canceled by the subscription must stay harmless.
-  backlogTimer();
+  // A late reply to the interrupted line cannot release the discarded merge.
+  f.socket.receive('serialport:read','ok');
   for(let i=0;i<4;i++) f.tick();
   assert.equal(gcode().length,1,'No motion may start without new wheel input');
   assert.equal(f.grbl.jogBacklog,null);
@@ -1312,7 +1339,6 @@ test('a long dwell before ACK preserves every merged detent without status queri
   assert.equal(f.queries(),0);
   assert.equal(gcode().length,1);
   f.socket.receive('serialport:read','ok');
-  f.tick(50);
   assert.equal(gcode().length,2);
   assert.equal(gcode()[1][1],'$J=G21 G91 X2.0000 F250.000');
   assert.equal(f.grbl.jogTarget.value,3);
@@ -1338,7 +1364,6 @@ test('zero-sum backlog after its trusted ACK re-evaluates unchanged Idle with a 
   assert.equal(f.grbl.jogBacklog.distance,0);
   assert.equal(f.queries(),0);
   f.socket.receive('serialport:read','ok');
-  f.tick(50);
   assert.equal(f.grbl.jogBacklog,null);
   assert.equal(stopCommands(f).filter(([name])=>name==='gcode').length,1);
   assert.equal(f.queries(),0);
@@ -1612,10 +1637,9 @@ for(const [before,after] of [['G20','G21'],['G21','G20']]) test(`pending ACK pre
   assert.equal(f.grbl.jog('X',12.7,254),'buffered');
   assertNear(f.grbl.jogBacklog.distance,12.7);
   f.broadcast({modal:{units:after}});
-  f.tick(50);
   assert.equal(jogCommands(f).length,1,'Known unit changes cannot bypass pending ACK');
   assertNear(f.grbl.jogBacklog.distance,12.7);
-  acknowledgeJog(f,jogCommands(f)[0]); f.tick(50);
+  acknowledgeJog(f,jogCommands(f)[0]);
   assert.equal(jogCommands(f).at(-1)[1],after==='G20'?'$J=G20 G91 X0.500000 F10.000000':'$J=G21 G91 X12.7000 F254.000');
   assertNear(f.grbl.jogTarget.value,38.1);
   assert.equal(f.grbl.jogBacklog,null);
@@ -1632,10 +1656,9 @@ for(const code of ['G20','G21']) test(`${code} backlog remains frozen in physica
   assert.equal(f.grbl.jog('X',12.7,254),'buffered');
   f.broadcast({modal:{}});
   acknowledgeJog(f,jogCommands(f)[0]);
-  f.tick(50);
   const notices=f.logs.length;
   assert.ok(notices>0,'Unknown-unit backlog refusal must explain why motion is frozen');
-  for(let n=0;n<4;n++) f.tick(50);
+  for(let n=0;n<4;n++) f.broadcast({modal:{}});
   assert.equal(f.logs.length,notices,'Retrying frozen backlog must not repeat the refusal');
   assert.equal(jogCommands(f).length,1);
   assertNear(f.grbl.jogBacklog.distance,12.7);
@@ -1644,7 +1667,6 @@ for(const code of ['G20','G21']) test(`${code} backlog remains frozen in physica
   assertNear(f.grbl.jogBacklog.distance,12.7);
   const restored=code==='G20'?'G21':'G20';
   f.broadcast({modal:{units:restored}});
-  f.tick(50);
   assert.equal(jogCommands(f).length,2);
   assert.equal(jogCommands(f).at(-1)[1],restored==='G20'?'$J=G20 G91 X0.500000 F10.000000':'$J=G21 G91 X12.7000 F254.000');
   assertNear(f.grbl.jogTarget.value,38.1);
@@ -1741,15 +1763,12 @@ test('canceling an unknown-unit frozen backlog discards it and cannot revive mot
   const f=gatedJogFixture('delayed');
   f.broadcast({modal:{units:'G20'}});
   f.grbl.jog('X',25.4,254); f.grbl.jog('X',12.7,254);
-  acknowledgeJog(f,jogCommands(f)[0]);
   f.broadcast({modal:{}});
-  f.tick(50);
+  acknowledgeJog(f,jogCommands(f)[0]);
   assertNear(f.grbl.jogBacklog.distance,12.7);
-  const retry=f.grbl.backlogTimer;
   f.grbl.cancelJog();
   assert.equal(f.grbl.jogBacklog,null);
   f.broadcast({modal:{units:'G21'}});
-  retry();
   f.advance(1500);
   assert.equal(jogCommands(f).length,1);
   assert.equal(f.grbl.jogPhase,'idle');
@@ -1809,17 +1828,16 @@ for(const residue of [0,0.00001]) test(`known-unit opposing detents with ${resid
   assert.equal(f.grbl.jog('X',0.2,254),'buffered');
   assert.equal(f.grbl.jog('X',-0.3+residue,254),'buffered');
   assertNear(f.grbl.jogBacklog.distance,residue);
-  acknowledgeJog(f,jogCommands(f)[0]);
   const notices=f.logs.length;
-  f.tick(50);
+  acknowledgeJog(f,jogCommands(f)[0]);
   assert.equal(f.grbl.jogBacklog,null);
-  assert.equal(f.grbl.backlogTimer,null);
+  assert.equal(f.grbl.backlogUnsubscribe,null);
   assert.equal(jogCommands(f).length,1,'Neither exact cancellation nor a zero wire word sends a jog');
   if(residue) assert.ok(f.logs.length>notices,'A nonzero unrepresentable residue must explain its rejection');
   else assert.equal(f.logs.length,notices,'Floating-point cancellation is not a rejected movement');
   f.machine.x=1; f.broadcast();
   f.advance(5000);
-  assert.equal(f.grbl.backlogTimer,null);
+  assert.equal(f.grbl.backlogUnsubscribe,null);
   assert.equal(f.jobs.size,0);
   assert.equal(jogCommands(f).length,1);
   f.broadcast({modal:{units:'G20'}});
@@ -1835,11 +1853,10 @@ test('G20 backlog feed that becomes zero in G21 is rejected once without a retry
   assert.equal(f.grbl.jog('X',12.7,0.0001),'buffered');
   assertNear(f.grbl.jogBacklog.feed,0.0001);
   f.broadcast({modal:{units:'G21'}});
-  acknowledgeJog(f,jogCommands(f)[0]);
   const notices=f.logs.length;
-  f.tick(50);
+  acknowledgeJog(f,jogCommands(f)[0]);
   assert.equal(f.grbl.jogBacklog,null);
-  assert.equal(f.grbl.backlogTimer,null);
+  assert.equal(f.grbl.backlogUnsubscribe,null);
   assert.equal(jogCommands(f).length,1);
   assert.ok(f.logs.length>notices,'A known-unit zero feed must explain its rejection');
   const rejectedNotices=f.logs.length;

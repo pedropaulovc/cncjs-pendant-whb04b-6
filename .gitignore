@@ -3,4 +3,7 @@ node_modules
 tsconfig.tsbuildinfo
 lib
 bin/
+obj/
+publish/
+TestResults/
 web/widget/vendor/

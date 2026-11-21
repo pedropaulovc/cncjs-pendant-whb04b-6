@@ -8,7 +8,9 @@ function clock() {
   let time = 0;
   const timers = new Map();
   return { now: () => time, schedule: (fn, ms) => { timers.set(fn, time + ms); return fn; }, cancel: fn => timers.delete(fn),
-    advance(ms) { time += ms; for (const [fn, due] of [...timers]) { if (due <= time) { timers.delete(fn); fn(); } } }, timers };
+    advance(ms) { time += ms; for (const [fn, due] of [...timers]) { if (due <= time) { timers.delete(fn); fn(); } } },
+    // Time passes but no timer runs: a hidden tab's clamped/throttled timers.
+    throttle(ms) { time += ms; }, timers };
 }
 function fixture() {
   const commands = [], logs = [], timer = clock(), listeners = new Set();
@@ -96,6 +98,23 @@ test('overrides wait for acknowledged Ov changes instead of flooding duplicate r
   f.ack(110, 100); f.ack(120, 100); f.ack(121, 100); f.ack(122, 100); f.ack(123, 100);
   assert.deepEqual(f.commands.filter(([c]) => c === 'feedOverride').map(([,n]) => n), [10,10,1,1,1]);
   assert.equal(f.timer.timers.size, 0);
+});
+
+test('override steps continue from confirming Ov reports when hidden-tab timers never fire', () => {
+  const f = fixture(); f.grbl.override('feed', 23);
+  const sent = () => f.commands.filter(([c]) => c === 'feedOverride').map(([,n]) => n);
+  for (const [feed, expected] of [[110, [10, 10]], [120, [10, 10, 1]], [121, [10, 10, 1, 1]], [122, [10, 10, 1, 1, 1]]]) {
+    f.timer.throttle(900);
+    f.notify();
+    assert.equal(sent().length, expected.length - 1, 'Reports without a fresh Ov confirmation send nothing');
+    f.session.overrides = [feed, 100, 100]; f.session.overrideSequence++; f.notify();
+    assert.deepEqual(sent(), expected);
+  }
+  f.session.overrides = [123, 100, 100]; f.session.overrideSequence++; f.notify();
+  assert.equal(f.grbl.pendingOverrides.size, 0);
+  assert.equal(f.grbl.overrideUnsubscribe, null);
+  assert.equal(f.timer.timers.size, 0);
+  assert.equal(f.logs.some(line => /discarded/.test(line)), false, 'Confirmed steps never expire behind a throttled poll');
 });
 
 test('override targets clamp, expire without feedback, and cannot cross reconnections', () => {
@@ -315,6 +334,19 @@ test('Continuous uses axis max-rate percentage, bounds pulses, cancels after sil
   f.input({ jog: 1 }); assert.equal(f.commands.filter(([c]) => c === 'gcode').length, 1);
   f.session.reportSequence+=2; f.input({ jog: 1 });
   assert.equal(f.commands.filter(([c]) => c === 'gcode').length, 2);
+});
+
+test('controller status ends a paused Continuous jog when hidden-tab timers fire late', () => {
+  const f = fixture(); f.press(0x0e); f.input({ jog: 1 }); f.session.activeState = 'Jog';
+  assert.equal(f.commands.filter(([c]) => c === 'gcode').length, 1);
+  f.timer.throttle(100); f.notify(true);
+  f.timer.throttle(50); f.input({ jog: 1 });
+  f.timer.throttle(150); f.notify(true);
+  assert.equal(f.commands.some(([c]) => c === 'jogCancel'), false, 'Wheel reports keep arriving within the pause window');
+  f.timer.throttle(30); f.notify(true);
+  assert.equal(f.commands.at(-1)[0], 'jogCancel', 'Status feedback enforces the 180 ms pause without the timer');
+  assert.equal(f.controls.wheelWatch, null);
+  assert.equal(f.commands.filter(([c]) => c === 'gcode').length, 1);
 });
 
 test('Continuous cancels on axis/mode/direction changes and suspend; no movement without known max-rate', () => {

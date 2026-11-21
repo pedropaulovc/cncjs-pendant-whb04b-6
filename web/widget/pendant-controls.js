@@ -22,6 +22,8 @@ export const MACRO_BUTTONS = [
 ].map(({ printed, ...definition }) => ({ ...definition, name: printed ? `${printed} (Fn+${definition.button})` : `Fn+${definition.button}` }));
 const MACROS = Object.fromEntries(MACRO_BUTTONS.map(definition => [definition.key, definition]));
 const LEAD = new Set([0x1c, 0x9b]);
+// A pause in wheel reports this long ends a Continuous jog.
+const CONTINUOUS_PAUSE = 180;
 export const CONFIG_KEY = 'whb04b-controls';
 export const DEFAULT_CONFIG = { largeSteps: 'disabled', spindleIncrement: 100, macros: {} };
 
@@ -51,6 +53,8 @@ export class PendantControls {
     this.axisCode = null;
     this.rateCode = null;
     this.timer = null;
+    this.wheelWatch = null;
+    this.lastWheel = -Infinity;
     this.lastPulse = -Infinity;
     this.direction = 0;
   }
@@ -73,6 +77,8 @@ export class PendantControls {
     this.onSuspend();
     if (this.timer !== null) this.cancel(this.timer);
     this.timer = null;
+    this.wheelWatch?.();
+    this.wheelWatch = null;
     this.grbl.cancelJog();
     this.lastPulse = -Infinity;
     this.direction = 0;
@@ -157,9 +163,15 @@ export class PendantControls {
     const direction = Math.sign(report.jog);
     if (this.direction && this.direction !== direction) this.suspend();
     this.direction = direction;
-    if (this.timer !== null) this.cancel(this.timer);
-    this.timer = this.schedule(() => this.suspend(), 180);
     const time = this.now();
+    this.lastWheel = time;
+    if (this.timer !== null) this.cancel(this.timer);
+    this.timer = this.schedule(() => this.suspend(), CONTINUOUS_PAUSE);
+    // A hidden tab fires that timer at least 1 s late (1 min after 5 min).
+    // Controller status during the segment is not throttled; check it too.
+    this.wheelWatch ??= this.grbl.session.subscribeMotion(() => {
+      if (this.now() - this.lastWheel >= CONTINUOUS_PAUSE) this.suspend();
+    });
     if (time - this.lastPulse < 200) return;
     const feed = max * selection.percent / 100;
     // One bounded segment outstanding, even when acceleration makes it take

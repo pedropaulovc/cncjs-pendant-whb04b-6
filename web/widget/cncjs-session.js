@@ -7,6 +7,7 @@ const FLUIDNC_SETTINGS = {
   $110: '$/axes/x/max_rate_mm_per_min', $111: '$/axes/y/max_rate_mm_per_min', $112: '$/axes/z/max_rate_mm_per_min',
 };
 const REQUIRED_SETTINGS = ['$13', '$110', '$111', '$112'];
+const STOP_POLL = 250;
 
 function withFluidncSettings(settings) {
   const reported = settings?.settings || {};
@@ -23,12 +24,13 @@ function withFluidncSettings(settings) {
 
 // Own one CNCjs socket and join only a port already opened by the operator.
 export class CncjsSession {
-  constructor({ io, origin, onStatus = () => {}, onState = () => {}, onConfig = () => {}, schedule = (...args) => setInterval(...args), cancel = (...args) => clearInterval(...args) }) {
-    Object.assign(this, { io, origin, onStatus, onState, onConfig, schedule, cancel });
+  constructor({ io, origin, onStatus = () => {}, onState = () => {}, onConfig = () => {}, schedule = (...args) => setInterval(...args), cancel = (...args) => clearInterval(...args), now = () => performance.now() }) {
+    Object.assign(this, { io, origin, onStatus, onState, onConfig, schedule, cancel, now });
     this.socket = null;
     this.timer = null;
     this.motionListeners = new Set();
     this.stopTimer = null;
+    this.stopPolled = -Infinity;
     this.stopPhase = 'idle';
     this.stopIntent = 'motion';
     this.stopPort = null;
@@ -198,6 +200,9 @@ export class CncjsSession {
       this.requestSettings();
       this.onState(type, state);
       this.notifyMotion(progress);
+      // CNCjs publishes changed state from its own 250 ms poll, unthrottled in
+      // a hidden tab; the Stop poll timer may run only once a minute there.
+      if (this.stopTimer !== null && this.now() - this.stopPolled >= STOP_POLL) this.pollStop();
     });
     on('controller:settings', (type, settings) => {
       if (type !== 'Grbl') return;
@@ -465,7 +470,7 @@ export class CncjsSession {
     this.socket.emit('command', this.status.port, 'feeder:stop');
     this.socket.emit('command', this.status.port, 'jogCancel');
     if (this.stopIntent === 'program') this.requestHold();
-    this.command('statusreport');
+    this.pollStop();
     // CNCjs's forced stop uses a cached state and a fixed 500 ms reset delay.
     // Explicit reports retain GRBL's Hold substate; never reset during Hold:1.
     this.startStopPolling();
@@ -476,8 +481,13 @@ export class CncjsSession {
     if (this.stopTimer !== null) return;
     const generation = this.generation;
     this.stopTimer = this.schedule(() => {
-      if (generation === this.generation && this.stopPhase !== 'idle') this.command('statusreport');
-    }, 250);
+      if (generation === this.generation && this.stopPhase !== 'idle') this.pollStop();
+    }, STOP_POLL);
+  }
+
+  pollStop() {
+    this.stopPolled = this.now();
+    this.command('statusreport');
   }
 
   cancelStopPolling() {
@@ -499,7 +509,7 @@ export class CncjsSession {
       this.stopIntent = 'motion';
       this.stopPhase = 'confirming';
       this.update('joined', 'Stopping: reset received; confirming controller status.');
-      this.command('statusreport');
+      this.pollStop();
       return;
     }
     const state = /^<([^|>]+)/.exec(line)?.[1];
@@ -510,13 +520,16 @@ export class CncjsSession {
       return;
     }
     // A previous explicit status query can already be in flight at Stop.
-    // Require another Idle report before releasing the motion interlock.
+    // Require another report before releasing the motion interlock, and ask
+    // for it now rather than on the (possibly hidden-tab-throttled) timer.
     if (state === 'Idle' && this.stopPhase !== 'idle-confirmation') {
       this.stopPhase = 'idle-confirmation';
+      this.pollStop();
       return;
     }
     if (state === 'Alarm' && this.stopPhase !== 'alarm-confirmation') {
       this.stopPhase = 'alarm-confirmation';
+      this.pollStop();
       return;
     }
     if (state === 'Idle' || state === 'Alarm') {
@@ -534,6 +547,7 @@ export class CncjsSession {
       if (this.stopPhase !== 'hold-confirmation') {
         this.stopPhase = 'hold-confirmation';
         this.update('joined', 'Stopping: confirming completed hold.');
+        this.pollStop();
         return;
       }
       this.update('joined', 'Stopping: hold complete; resetting controller.');
