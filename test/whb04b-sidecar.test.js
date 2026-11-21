@@ -4,6 +4,7 @@ import test from 'node:test';
 import { buildDisplayFrame, parseInput } from 'cncjs-pendant-whb04b-6';
 import { WHB04BSidecar, DEFAULT_SIDECAR_URL, SidecarLink, SIDECAR_STALE_MS } from 'cncjs-pendant-whb04b-6/sidecar';
 import { WHB04BWebHID } from '../web/whb04b-webhid.js';
+import { PendantControls } from '../web/widget/pendant-controls.js';
 import {
   DEFAULT_LINK, parseLink, createPendant, transportOf, hiddenTabPolicy, connectLabel, connectPendant, linkPill, linkMessage, staleMessage,
 } from '../web/widget/pendant-link.js';
@@ -140,7 +141,7 @@ test('input data longer than seven bytes uses the first seven, like WebHID', () 
   assert.equal(f.of('use')[0].jog, 3);
 });
 
-test('stale input keeps dials but releases keys and zeroes the wheel', () => {
+test('stale input keeps dials, zeroes the wheel, and does not apply non-safety keys', () => {
   const f = fixture();
   f.pendant.connect();
   f.socket.hello();
@@ -162,6 +163,26 @@ test('stale input keeps dials but releases keys and zeroes the wheel', () => {
   assert.equal(fresh[0].jog, 1);
 });
 
+test('stale key slots keep their last delivered key, pass Stop/Reset, and drop a carried-over Stop', () => {
+  const f = fixture();
+  f.pendant.connect();
+  f.socket.hello();
+  let nonce = 0;
+  const keys = () => { const raw = f.of('use').at(-1).raw; return [raw[2], raw[3]]; };
+  const send = (key1, key2, age = 0) => f.socket.receive({ type: 'input', reportId: 4, data: [nonce++, key1, key2, 0x0f, 0x11, 0, 0], t: WALL - age });
+  send(0x0c, 0);
+  send(0, 0x03, 1000);
+  assert.deepEqual(keys(), [0x0c, 0], 'Held Fn stays held; stale Start/Pause is not pressed');
+  send(0x0c, 0x02, 1000);
+  assert.deepEqual(keys(), [0, 0x02], 'Stale Fn+Stop is a plain Stop');
+  send(0x02, 0x0c, 1000);
+  assert.deepEqual(keys(), [0x02, 0]);
+  send(0x03, 0, 1000);
+  assert.deepEqual(keys(), [0, 0], 'A carried-over Stop is not re-applied by a stale non-safety key');
+  send(0x01, 0x02, 1000);
+  assert.deepEqual(keys(), [0x01, 0x02], 'Both safety keys pass');
+});
+
 test('future, missing, and non-numeric stamps are stale', () => {
   for (const extra of [{ t: WALL + SIDECAR_STALE_MS + 1 }, { t: undefined }, { t: null }, { t: 'now' }]) {
     const f = fixture();
@@ -172,6 +193,84 @@ test('future, missing, and non-numeric stamps are stale', () => {
     assert.equal(use.jog, 0, JSON.stringify(extra));
     assert.equal(use.firstKeyCode, 0);
   }
+});
+
+// Sidecar input wired into the real PendantControls, as the widget does.
+function controlsFixture() {
+  const f = fixture();
+  const calls = [];
+  const grbl = {
+    jogUnits: { label: 'mm', scale: 1 }, session: { subscribeMotion: () => () => {} }, cancelJog() {},
+    stop: () => calls.push('stop'), reset: () => calls.push('reset'), startPause: () => calls.push('startPause'),
+    macro: code => calls.push(['macro', ...code]), maxRate: () => 3000, jog: (...args) => calls.push(['jog', ...args]),
+    jogPulse: (...args) => { calls.push(['jogPulse', ...args]); return 'sent'; }, override: (...args) => calls.push(['override', ...args]), overrideTarget() {},
+  };
+  const controls = new PendantControls(grbl, { schedule: () => 0, cancel() {}, config: { largeSteps: 'disabled', spindleIncrement: 100, macros: { 11: 'M3', 12: 'M5' } } });
+  f.pendant.addEventListener('use', e => controls.handleInput(e.detail));
+  f.pendant.connect();
+  f.socket.hello();
+  let nonce = 0;
+  const send = (key1, key2, { jog = 0, left = 0x11, right = 0x0f, age = 0 } = {}) =>
+    f.socket.receive({ type: 'input', reportId: 4, data: [nonce++, key1, key2, right, left, jog & 0xff, 0], t: WALL - age });
+  const count = name => calls.filter(call => call === name || call[0] === name).length;
+  send(0, 0);
+  return { ...f, calls, controls, send, count };
+}
+const STALE = { age: 1000 };
+
+test('a stale Stop or Reset press and release still reaches the controller', () => {
+  const f = controlsFixture();
+  f.send(0x02, 0, STALE);
+  f.send(0, 0, STALE);
+  f.send(0, 0);
+  assert.equal(f.count('stop'), 1);
+  f.send(0, 0x01, STALE);
+  f.send(0, 0, STALE);
+  assert.equal(f.count('reset'), 1);
+  assert.deepEqual(f.of('stale'), [{ count: 2 }]);
+});
+
+test('a stale Fn+Stop or Fn+Reset is a plain Stop/Reset, never the Fn macro', () => {
+  const f = controlsFixture();
+  f.send(0x0c, 0x02, STALE);
+  f.send(0, 0, STALE);
+  f.send(0x01, 0x0c, STALE);
+  f.send(0, 0, STALE);
+  assert.equal(f.count('stop'), 1);
+  assert.equal(f.count('reset'), 1);
+  assert.equal(f.count('macro'), 0);
+});
+
+test('a stale Start/Pause press is ignored', () => {
+  const f = controlsFixture();
+  f.send(0x03, 0, STALE);
+  f.send(0, 0, STALE);
+  f.send(0, 0);
+  assert.equal(f.count('startPause'), 0);
+});
+
+test('Start/Pause held across a stale gap fires once', () => {
+  const f = controlsFixture();
+  f.send(0x03, 0);
+  assert.equal(f.count('startPause'), 1);
+  f.send(0x03, 0, STALE);
+  f.send(0, 0, STALE);
+  assert.ok(f.controls.keys.has(0x03), 'A stale release does not release the held key');
+  f.send(0x03, 0, STALE);
+  f.send(0x03, 0);
+  f.send(0, 0);
+  assert.equal(f.count('startPause'), 1);
+});
+
+test('a stale wheel never jogs but its dials still update', () => {
+  const f = controlsFixture();
+  f.send(0, 0, { ...STALE, jog: 5 });
+  f.send(0, 0, { ...STALE, jog: -3, left: 0x13, right: 0x10 });
+  assert.equal(f.count('jog'), 0);
+  assert.equal(f.controls.axisCode, 0x13);
+  assert.equal(f.controls.rateCode, 0x10);
+  f.send(0, 0, { jog: 1, left: 0x13, right: 0x10 });
+  assert.deepEqual(f.calls.filter(([name]) => name === 'jog'), [['jog', 'Z', 1, 3000]], 'Fresh wheel input still jogs');
 });
 
 test('a stale burst is reported once, with its count, when fresh input or a detach ends it', () => {
@@ -492,6 +591,6 @@ test('link log messages explain each sidecar state', () => {
   assert.match(forbidden, /--allow-origin http:\/\/cnc\.local:8000/);
   assert.match(forbidden, /allowedOrigins in %LOCALAPPDATA%\\WHB04B-Sidecar\\settings\.json/);
   assert.match(forbidden, /press Connect sidecar/);
-  assert.equal(staleMessage(3), 'Pendant: ignored keys and wheel in 3 late sidecar reports (more than 300 ms old); dial positions still applied.');
+  assert.equal(staleMessage(3), 'Pendant: 3 late sidecar reports (more than 300 ms old): wheel and keys ignored except Stop/Reset; dial positions applied.');
   assert.match(staleMessage(1), /1 late sidecar report \(/);
 });

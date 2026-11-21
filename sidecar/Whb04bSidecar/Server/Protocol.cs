@@ -20,6 +20,8 @@ internal static class Protocol
 
     public static string StateName(DeviceState state) => state == DeviceState.Attached ? "attached" : "detached";
 
+    public static string LcdName(LcdState state) => state == LcdState.Stuck ? "stuck" : "ok";
+
     public static byte[] Hello(string version, DeviceState state) => Build(w =>
     {
         w.WriteString("type", "hello");

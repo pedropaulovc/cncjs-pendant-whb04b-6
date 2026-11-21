@@ -32,6 +32,11 @@ const MANUAL_ONLY = [SidecarLink.Superseded, SidecarLink.Forbidden, SidecarLink.
 
 const INPUT_REPORT_ID = 0x04;
 const INPUT_BODY_SIZE = 7;
+// Body byte offsets: [random, key1, key2, rightDial, leftDial, jog, checksum].
+const KEY_SLOTS = [1, 2];
+const JOG_BYTE = 5;
+// Reset and Stop pass through stale reports: a late Stop/Reset is always safe.
+const SAFETY_KEYS = new Set([0x01, 0x02]);
 const RECONNECT_MIN = 500;
 const RECONNECT_MAX = 5000;
 
@@ -50,6 +55,8 @@ export class WHB04BSidecar extends EventTarget {
     this.socket = null;
     this._superseded = null;
     this._previous = null;
+    // Key codes in the last dispatched report, per slot.
+    this._dispatchedKeys = [0, 0];
     this._staleCount = 0;
     this._reconnectTimer = null;
     this._reconnectDelay = RECONNECT_MIN;
@@ -147,7 +154,7 @@ export class WHB04BSidecar extends EventTarget {
     }
     const attached = !this.connected;
     this.connected = true;
-    if (attached) this._previous = null;
+    if (attached) { this._previous = null; this._dispatchedKeys = [0, 0]; }
     this._setLink(SidecarLink.Open, { url: this.url, version: this.version });
     if (attached) this.dispatchEvent(new CustomEvent('attach', { detail: { device: null, transport: 'sidecar', version: this.version } }));
   }
@@ -159,6 +166,7 @@ export class WHB04BSidecar extends EventTarget {
     if (!this.connected) return;
     this.connected = false;
     this._previous = null;
+    this._dispatchedKeys = [0, 0];
     this.dispatchEvent(new CustomEvent('remove'));
   }
 
@@ -200,23 +208,45 @@ export class WHB04BSidecar extends EventTarget {
     try { socket.close(1000); } catch { /* already closing */ }
   }
 
-  // A late report (frozen page, backed-up socket) must not replay keys or
-  // wheel motion: keep its dials, release keys, zero the wheel. A report
-  // without a usable `t` stamp counts as stale.
+  // A report without a usable `t` stamp counts as stale.
   _handleInput(message) {
     if (!this.connected || message.reportId !== INPUT_REPORT_ID || !isBodyArray(message.data)) return;
     const body = message.data.slice(0, INPUT_BODY_SIZE);
     const stale = typeof message.t !== 'number' || !(Math.abs(this.now() - message.t) <= SIDECAR_STALE_MS);
     if (stale) {
-      body[1] = 0; body[2] = 0; body[5] = 0;
       this._staleCount++;
-    } else {
-      this._endStaleBurst();
+      this._dispatch(this._staleBody(body));
+      return;
     }
-    const bytes = Uint8Array.from([message.reportId, ...body]);
+    this._endStaleBurst();
+    this._dispatch(body);
+  }
+
+  // A late report (frozen page, backed-up socket) never jogs and never makes a
+  // press or release edge, except that Stop/Reset always pass. Dials are kept.
+  _staleBody(body) {
+    const stale = [...body];
+    stale[JOG_BYTE] = 0;
+    const keys = this._staleKeys(KEY_SLOTS.map(slot => body[slot]));
+    KEY_SLOTS.forEach((slot, index) => { stale[slot] = keys[index]; });
+    return stale;
+  }
+
+  _staleKeys(codes) {
+    // A passed Stop/Reset is plain, never Fn+Stop/Fn+Reset (macro slots):
+    // every other slot is released.
+    if (codes.some(code => SAFETY_KEYS.has(code))) return codes.map(code => SAFETY_KEYS.has(code) ? code : 0);
+    // Otherwise each slot keeps its last dispatched key, minus a carried-over
+    // Stop/Reset that this stale report no longer holds.
+    return this._dispatchedKeys.map(last => SAFETY_KEYS.has(last) ? 0 : last);
+  }
+
+  _dispatch(body) {
+    const bytes = Uint8Array.from([INPUT_REPORT_ID, ...body]);
     const sig = bytes.join(',');
     if (sig === this._previous) return;
     this._previous = sig;
+    this._dispatchedKeys = KEY_SLOTS.map(slot => body[slot]);
     this.dispatchEvent(new CustomEvent('use', { detail: parseInput(bytes) }));
   }
 
@@ -231,8 +261,8 @@ export class WHB04BSidecar extends EventTarget {
     const inFlight = this._displayInFlight;
     if (!inFlight || message.id !== inFlight.id) return;
     this._displayInFlight = null;
-    if (message.type === 'display:ack') inFlight.resolve();
-    else inFlight.reject(new Error(typeof message.message === 'string' && message.message ? message.message : 'Sidecar LCD write failed.'));
+    if (message.type === 'display:ack') { inFlight.resolve(); return; }
+    inFlight.reject(new Error(typeof message.message === 'string' && message.message ? message.message : 'Sidecar LCD write failed.'));
   }
 
   _failInFlight(error) {

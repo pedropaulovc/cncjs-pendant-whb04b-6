@@ -6,11 +6,12 @@
 // example a CSP without `worker-src blob:`), pending and later timers move to
 // window timers and the fallback is logged once.
 
+// Timer kinds: 'once' fires one time; 'repeat' fires every `ms` until canceled.
 const SOURCE = `const handles = new Map();
 onmessage = ({ data: { op, id, ms } }) => {
   if (op === 'cancel') { clearTimeout(handles.get(id)); handles.delete(id); return; }
-  if (op === 'once') handles.set(id, setTimeout(() => { handles.delete(id); postMessage(id); }, ms));
-  else handles.set(id, setInterval(() => postMessage(id), ms));
+  if (op === 'once') { handles.set(id, setTimeout(() => { handles.delete(id); postMessage(id); }, ms)); return; }
+  handles.set(id, setInterval(() => postMessage(id), ms));
 };`;
 
 function blobWorker() {
@@ -31,12 +32,13 @@ export function createWorkerTimers({ createWorker = blobWorker, log = () => {}, 
   const fire = (id) => {
     const entry = entries.get(id);
     if (!entry) return;
-    if (entry.repeat) entry.due = now() + entry.ms;
-    else entries.delete(id);
+    if (entry.kind === 'once') entries.delete(id);
+    entry.due = now() + entry.ms;
     entry.fn();
   };
   const startWindow = (id, entry, delay) => {
-    entry.handle = entry.repeat ? setInterval(() => fire(id), entry.ms) : setTimeout(() => fire(id), delay);
+    if (entry.kind === 'once') { entry.handle = setTimeout(() => fire(id), delay); return; }
+    entry.handle = setInterval(() => fire(id), entry.ms);
   };
   const fallBack = (reason) => {
     if (mode === 'window') return;
@@ -55,24 +57,24 @@ export function createWorkerTimers({ createWorker = blobWorker, log = () => {}, 
     fallBack(String(error?.message || error));
   }
 
-  const add = (fn, ms, repeat) => {
+  const add = (fn, ms, kind) => {
     const id = ++nextId;
-    const entry = { fn, ms, repeat, due: now() + ms, handle: null };
+    const entry = { fn, ms, kind, due: now() + ms, handle: null };
     entries.set(id, entry);
-    if (mode === 'worker') worker.postMessage({ op: repeat ? 'repeat' : 'once', id, ms });
-    else startWindow(id, entry, ms);
+    if (mode === 'window') { startWindow(id, entry, ms); return id; }
+    worker.postMessage({ op: kind, id, ms });
     return id;
   };
   return {
     get mode() { return mode; },
-    schedule: (fn, ms) => add(fn, ms, false),
-    repeat: (fn, ms) => add(fn, ms, true),
+    schedule: (fn, ms) => add(fn, ms, 'once'),
+    repeat: (fn, ms) => add(fn, ms, 'repeat'),
     cancel(id) {
       const entry = entries.get(id);
       if (!entry) return;
       entries.delete(id);
-      if (mode === 'worker') worker.postMessage({ op: 'cancel', id });
-      else clearTimeout(entry.handle);
+      if (mode === 'window') { clearTimeout(entry.handle); return; }
+      worker.postMessage({ op: 'cancel', id });
     },
   };
 }

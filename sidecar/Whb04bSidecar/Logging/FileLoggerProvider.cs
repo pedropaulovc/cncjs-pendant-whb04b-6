@@ -103,16 +103,34 @@ internal sealed class FileLoggerProvider : ILoggerProvider
         while (true)
         {
             var path = Path.Combine(_directory, FileName(day, _index));
-            var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
-            if (stream.Length < MaxFileBytes)
+            var stream = TryOpenExclusiveWriter(path);
+            if (stream is not null && stream.Length < MaxFileBytes)
             {
                 _writer = new StreamWriter(stream, new UTF8Encoding(false));
                 PruneOldFiles();
                 return _writer;
             }
 
-            stream.Dispose();
+            stream?.Dispose();
             _index++;
+        }
+    }
+
+    /// <summary>
+    /// Opens <paramref name="path"/> for appending with no other writer allowed (readers are fine). Two sidecars
+    /// (e.g. tray plus a headless test run) appending to one file would overwrite each other's lines, so the second
+    /// gets null here and moves on to the next file index.
+    /// </summary>
+    private static FileStream? TryOpenExclusiveWriter(string path)
+    {
+        const int ErrorSharingViolation = 32;
+        try
+        {
+            return new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read | FileShare.Delete);
+        }
+        catch (IOException ex) when ((ex.HResult & 0xFFFF) == ErrorSharingViolation)
+        {
+            return null;
         }
     }
 

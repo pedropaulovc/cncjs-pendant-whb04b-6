@@ -48,7 +48,8 @@ export interface WHB04BSidecarOptions {
  * Same `attach` / `remove` / `use` events as WHB04BWebHID, plus a `link`
  * CustomEvent<SidecarLinkDetail> whenever the sidecar link status changes and
  * a `stale` CustomEvent<{ count: number }> when a burst of stale input reports
- * ends. Stale reports are delivered as `use` with no keys and no wheel motion.
+ * ends. Stale reports are delivered as `use` with no wheel motion; Stop and
+ * Reset pass, other keys keep their last delivered state.
  */
 export class WHB04BSidecar extends EventTarget {
   constructor(options?: WHB04BSidecarOptions);

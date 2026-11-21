@@ -128,25 +128,25 @@ internal static class Program
         var origins = options.AllowedOrigins.Count == 0 ? "loopback only" : "loopback + " + string.Join(", ", options.AllowedOrigins);
         logger.LogInformation("Listening on ws://127.0.0.1:{Port}{Path} (origins: {Origins})", host.Port, SidecarHost.WebSocketPath, origins);
 
+        var shutdown = new ShutdownSequence(host, logger);
         try
         {
-            Run(cli.RunMode, host, options, settingsLoad, logger);
+            Run(cli.RunMode, host, options, settingsLoad, logger, shutdown);
         }
         finally
         {
-            logger.LogInformation("Shutting down");
-            Task.Run(() => host.DisposeAsync().AsTask()).GetAwaiter().GetResult();
+            shutdown.Run();
         }
 
         return (int)ExitCode.Ok;
     }
 
-    private static void Run(RunMode runMode, SidecarHost host, SidecarOptions options, SettingsLoad settingsLoad, ILogger logger)
+    private static void Run(RunMode runMode, SidecarHost host, SidecarOptions options, SettingsLoad settingsLoad, ILogger logger, ShutdownSequence shutdown)
     {
         switch (runMode)
         {
             case RunMode.Headless:
-                RunHeadless(logger);
+                RunHeadless(logger, shutdown);
                 return;
             case RunMode.Tray:
                 RunTray(host, options, settingsLoad, logger);
@@ -194,8 +194,13 @@ internal static class Program
         });
     });
 
-    /// <summary>Runs until Ctrl+C / Ctrl+Break (SIGINT) or console close / logoff / shutdown (SIGTERM).</summary>
-    private static void RunHeadless(ILogger logger)
+    /// <summary>
+    /// Runs until a console control event. .NET maps them as CTRL_C → SIGINT, CTRL_BREAK → SIGQUIT,
+    /// CTRL_CLOSE (window closed) → SIGHUP, CTRL_SHUTDOWN → SIGTERM; CTRL_LOGOFF is not mapped. For close and
+    /// shutdown Windows ends the process as soon as the handler returns, so those handlers hold the control thread
+    /// until the shutdown sequence has finished (bounded, since Windows only waits about 5 s).
+    /// </summary>
+    private static void RunHeadless(ILogger logger, ShutdownSequence shutdown)
     {
         using var stop = new ManualResetEventSlim();
         void RequestStop(PosixSignalContext context)
@@ -205,10 +210,18 @@ internal static class Program
             stop.Set();
         }
 
+        void RequestStopAndWait(PosixSignalContext context)
+        {
+            RequestStop(context);
+            shutdown.WaitForCompletion(ShutdownSequence.ConsoleCloseBudget);
+        }
+
         using var sigint = PosixSignalRegistration.Create(PosixSignal.SIGINT, RequestStop);
         using var sigquit = PosixSignalRegistration.Create(PosixSignal.SIGQUIT, RequestStop);
-        using var sigterm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, RequestStop);
+        using var sighup = PosixSignalRegistration.Create(PosixSignal.SIGHUP, RequestStopAndWait);
+        using var sigterm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, RequestStopAndWait);
         stop.Wait();
+        shutdown.Run();
     }
 
     private static void RunTray(SidecarHost host, SidecarOptions options, SettingsLoad settingsLoad, ILogger logger)

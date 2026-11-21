@@ -35,6 +35,7 @@ public sealed class HttpEndpointTests
         Assert.Equal("attached", idle.GetProperty("device").GetString());
         Assert.Equal(0, idle.GetProperty("clients").GetInt32());
         Assert.Equal("hid", idle.GetProperty("mode").GetString());
+        Assert.Equal("ok", idle.GetProperty("lcd").GetString());
 
         using var socket = await server.ConnectOwnerAsync();
         server.Fake.Detach();
@@ -67,11 +68,35 @@ public sealed class HttpEndpointTests
 
     [Theory]
     [InlineData("http://evil.example")]
+    [InlineData("https://example.com")]
     [InlineData("http://localhost.evil.example")]
+    [InlineData("http://8.8.8.8")]
+    [InlineData("http://172.32.0.1")]
     [InlineData("null")]
     [InlineData("file://")]
     [InlineData("chrome-extension://abcdef")]
-    public async Task ForeignOriginsGet403OnHttpAnd4403OnWebSocket(string origin)
+    public async Task PublicOriginsGetPlain403WithNoUpgrade(string origin)
+    {
+        await using var server = await StartFakeAsync();
+
+        using var response = await GetHealthAsync(server, origin);
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+
+        using var socket = new ClientWebSocket();
+        socket.Options.SetRequestHeader("Origin", origin);
+        socket.Options.CollectHttpResponseDetails = true;
+        await Assert.ThrowsAsync<WebSocketException>(() => socket.ConnectAsync(server.WebSocketUri, CancellationToken.None));
+        Assert.Equal(HttpStatusCode.Forbidden, socket.HttpStatusCode);
+    }
+
+    [Theory]
+    [InlineData("http://192.168.1.50:8000")]
+    [InlineData("http://10.0.0.2")]
+    [InlineData("http://[fd12:3456::1]:8000")]
+    [InlineData("http://raspberrypi:8000")]
+    [InlineData("http://cnc.local")]
+    [InlineData("https://shop.home.arpa")]
+    public async Task LocalNetworkOriginsGet403OnHttpAnd4403OnWebSocket(string origin)
     {
         await using var server = await StartFakeAsync();
 
@@ -94,7 +119,7 @@ public sealed class HttpEndpointTests
 
         for (var attempt = 0; attempt < 3; attempt++)
         {
-            using var intruder = await server.ConnectAsync("http://evil.example");
+            using var intruder = await server.ConnectAsync("http://192.168.1.50:8000");
             Assert.Equal(4403, (await ReceiveCloseAsync(intruder)).Status);
         }
 
@@ -102,7 +127,7 @@ public sealed class HttpEndpointTests
         Assert.Equal(1, (await HealthAsync(server)).GetProperty("clients").GetInt32());
         server.Fake.EmitInput(1, 2, 3, 4, 5, 6, 7);
         Assert.Equal("input", (await ReceiveJsonAsync(owner)).GetProperty("type").GetString());
-        var warnings = server.ReadLog().Split('\n').Count(line => line.Contains(" WRN ") && line.Contains("origin http://evil.example"));
+        var warnings = server.ReadLog().Split('\n').Count(line => line.Contains(" WRN ") && line.Contains("origin http://192.168.1.50:8000"));
         Assert.Equal(1, warnings);
     }
 

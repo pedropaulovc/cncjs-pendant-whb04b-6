@@ -77,5 +77,5 @@ export function linkMessage({ link, url, code, reason, cause, protocol, version 
 }
 
 export function staleMessage(count) {
-  return `Pendant: ignored keys and wheel in ${count} late sidecar report${count === 1 ? '' : 's'} (more than ${SIDECAR_STALE_MS} ms old); dial positions still applied.`;
+  return `Pendant: ${count} late sidecar report${count === 1 ? '' : 's'} (more than ${SIDECAR_STALE_MS} ms old): wheel and keys ignored except Stop/Reset; dial positions applied.`;
 }

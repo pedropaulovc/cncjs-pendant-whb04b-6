@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Net.WebSockets;
-using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 
 namespace Whb04bSidecar.Server;
@@ -14,30 +13,35 @@ internal enum ConnectionState
 internal enum EnqueueResult
 {
     Queued,
-    DroppedOutboxFull,
+    QueuedDroppedOldest,
     DroppedClosing,
 }
 
 /// <summary>
 /// One WebSocket client. All sends go through a single-reader outbox so the HID thread, the receive loop
-/// and ownership changes never write to the socket concurrently. Input messages are bounded so a slow client
-/// gets fresh reports instead of a growing backlog; control messages are never dropped.
+/// and ownership changes never write to the socket concurrently. Queued input is bounded: when a slow client has
+/// <see cref="MaxPendingInputs"/> inputs waiting, the oldest is dropped so the newest (current dial/axis) still goes
+/// out. Control messages are never dropped, and the remaining messages keep their order.
 /// </summary>
 internal sealed class ClientConnection : IDisposable
 {
-    /// <summary>More input messages than this waiting in the outbox → further input is dropped until it drains.</summary>
     public const int MaxPendingInputs = 64;
 
     /// <summary>How long a client gets to answer our close frame before the socket is aborted.</summary>
     private static readonly TimeSpan CloseHandshakeTimeout = TimeSpan.FromSeconds(3);
 
-    private readonly Channel<Outgoing> _outbox = Channel.CreateUnbounded<Outgoing>(new UnboundedChannelOptions { SingleReader = true });
     private readonly CancellationTokenSource _receiveCts;
     private readonly ILogger _logger;
     private readonly object _lock = new();
+
+    // The outbox: every queued message in send order, plus the input nodes among them (oldest first) so the
+    // oldest input can be removed in O(1). The semaphore counts queued messages for the send loop.
+    private readonly LinkedList<Outgoing> _queue = new();
+    private readonly Queue<LinkedListNode<Outgoing>> _queuedInputs = new();
+    private readonly SemaphoreSlim _queued = new(0);
+    private OutboxState _outboxState = OutboxState.Accepting;
     private ConnectionState _state = ConnectionState.Open;
     private InputFlow _inputFlow = InputFlow.Flowing;
-    private int _pendingInputs;
     private long _droppedInBurst;
 
     public ClientConnection(long id, WebSocket socket, string origin, string remote, ILogger logger, CancellationToken requestAborted)
@@ -48,6 +52,12 @@ internal sealed class ClientConnection : IDisposable
         Remote = remote;
         _logger = logger;
         _receiveCts = CancellationTokenSource.CreateLinkedTokenSource(requestAborted);
+    }
+
+    private enum OutboxState
+    {
+        Accepting,
+        Completed,
     }
 
     private enum InputFlow
@@ -94,7 +104,7 @@ internal sealed class ClientConnection : IDisposable
         {
             lock (_lock)
             {
-                return _pendingInputs;
+                return _queuedInputs.Count;
             }
         }
     }
@@ -103,7 +113,8 @@ internal sealed class ClientConnection : IDisposable
 
     public string? CloseReasonSent { get; private set; }
 
-    public long InputsSent;
+    /// <summary>Inputs accepted into the outbox (including ones later dropped as oldest).</summary>
+    public long InputsQueued;
 
     public long InputsDropped;
 
@@ -111,48 +122,62 @@ internal sealed class ClientConnection : IDisposable
 
     public long FramesFailed;
 
-    /// <summary>Queues a control message (hello, device, display:*, superseded). Dropped only once the connection is closing.</summary>
-    public void Send(byte[] utf8Json) => _outbox.Writer.TryWrite(new Outgoing(OutgoingKind.Control, utf8Json, null, null));
+    /// <summary>Queues a control message (hello, device, display:*, superseded). Dropped only once the outbox is completed.</summary>
+    public void Send(byte[] utf8Json)
+    {
+        lock (_lock)
+        {
+            if (_outboxState == OutboxState.Completed)
+            {
+                return;
+            }
 
-    /// <summary>Queues an input message unless <see cref="MaxPendingInputs"/> are already waiting.</summary>
+            _queue.AddLast(new Outgoing(OutgoingKind.Control, utf8Json, null, null));
+            _queued.Release();
+        }
+    }
+
+    /// <summary>Queues an input message; with <see cref="MaxPendingInputs"/> already waiting, the oldest one is dropped.</summary>
     public EnqueueResult SendInput(byte[] utf8Json)
     {
         lock (_lock)
         {
-            if (_state == ConnectionState.Closing)
+            if (_state == ConnectionState.Closing || _outboxState == OutboxState.Completed)
             {
                 return EnqueueResult.DroppedClosing;
             }
 
-            if (_pendingInputs >= MaxPendingInputs)
-            {
-                InputsDropped++;
-                _droppedInBurst++;
-                if (_inputFlow == InputFlow.Flowing)
-                {
-                    _inputFlow = InputFlow.Dropping;
-                    _logger.LogWarning(
-                        "Client #{Client} ({Origin}) has {Pending} input messages queued; dropping input until it catches up",
-                        Id,
-                        Origin,
-                        _pendingInputs);
-                }
-
-                return EnqueueResult.DroppedOutboxFull;
-            }
-
-            if (_inputFlow == InputFlow.Dropping)
+            if (_queuedInputs.Count < MaxPendingInputs && _inputFlow == InputFlow.Dropping)
             {
                 _inputFlow = InputFlow.Flowing;
-                _logger.LogWarning("Client #{Client} ({Origin}) caught up; {Dropped} input messages were dropped", Id, Origin, _droppedInBurst);
+                _logger.LogWarning("Client #{Client} ({Origin}) caught up; {Dropped} old input messages were dropped", Id, Origin, _droppedInBurst);
                 _droppedInBurst = 0;
             }
 
-            // Written under the lock so Close() cannot complete the outbox between the check and the write.
-            _pendingInputs++;
-            InputsSent++;
-            _outbox.Writer.TryWrite(new Outgoing(OutgoingKind.Input, utf8Json, null, null));
-            return EnqueueResult.Queued;
+            InputsQueued++;
+            var node = _queue.AddLast(new Outgoing(OutgoingKind.Input, utf8Json, null, null));
+            _queuedInputs.Enqueue(node);
+            if (_queuedInputs.Count <= MaxPendingInputs)
+            {
+                _queued.Release();
+                return EnqueueResult.Queued;
+            }
+
+            // One in, one out: the queued-message count is unchanged, so the semaphore is not released.
+            _queue.Remove(_queuedInputs.Dequeue());
+            InputsDropped++;
+            _droppedInBurst++;
+            if (_inputFlow == InputFlow.Flowing)
+            {
+                _inputFlow = InputFlow.Dropping;
+                _logger.LogWarning(
+                    "Client #{Client} ({Origin}) has {Pending} input messages queued; dropping the oldest until it catches up",
+                    Id,
+                    Origin,
+                    MaxPendingInputs);
+            }
+
+            return EnqueueResult.QueuedDroppedOldest;
         }
     }
 
@@ -167,38 +192,57 @@ internal sealed class ClientConnection : IDisposable
             }
 
             _state = ConnectionState.Closing;
-        }
+            if (_outboxState == OutboxState.Completed)
+            {
+                return;
+            }
 
-        _outbox.Writer.TryWrite(new Outgoing(OutgoingKind.Close, null, status, Protocol.CloseReason(reason)));
-        _outbox.Writer.TryComplete();
+            _queue.AddLast(new Outgoing(OutgoingKind.Close, null, status, Protocol.CloseReason(reason)));
+            _outboxState = OutboxState.Completed;
+            _queued.Release();
+        }
     }
 
     /// <summary>The receive side is done; flush what is queued and stop.</summary>
-    public void Complete() => _outbox.Writer.TryComplete();
+    public void Complete()
+    {
+        lock (_lock)
+        {
+            if (_outboxState == OutboxState.Completed)
+            {
+                return;
+            }
+
+            _outboxState = OutboxState.Completed;
+            _queued.Release();
+        }
+    }
 
     public async Task RunSendLoopAsync()
     {
         try
         {
-            await foreach (var item in _outbox.Reader.ReadAllAsync().ConfigureAwait(false))
+            while (true)
             {
-                switch (item.Kind)
+                await _queued.WaitAsync().ConfigureAwait(false);
+                var (item, outbox) = TakeNext();
+                if (item is null && outbox == OutboxState.Completed)
                 {
-                    case OutgoingKind.Input:
-                        lock (_lock)
-                        {
-                            _pendingInputs--;
-                        }
-
-                        await Socket.SendAsync(item.Text!, WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None).ConfigureAwait(false);
-                        continue;
-                    case OutgoingKind.Control:
-                        await Socket.SendAsync(item.Text!, WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None).ConfigureAwait(false);
-                        continue;
+                    return;
                 }
 
-                await SendCloseAsync(item.Status!.Value, item.Reason!).ConfigureAwait(false);
-                return;
+                if (item is null)
+                {
+                    continue;
+                }
+
+                if (item.Value.Kind == OutgoingKind.Close)
+                {
+                    await SendCloseAsync(item.Value.Status!.Value, item.Value.Reason!).ConfigureAwait(false);
+                    return;
+                }
+
+                await Socket.SendAsync(item.Value.Text!, WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None).ConfigureAwait(false);
             }
         }
         catch (Exception ex) when (ex is WebSocketException or OperationCanceledException or ObjectDisposedException or IOException)
@@ -208,7 +252,32 @@ internal sealed class ClientConnection : IDisposable
         }
     }
 
-    public void Dispose() => _receiveCts.Dispose();
+    public void Dispose()
+    {
+        _receiveCts.Dispose();
+        _queued.Dispose();
+    }
+
+    /// <summary>Removes the next message to send (null when the queue is empty), with the outbox state at that moment.</summary>
+    private (Outgoing? Item, OutboxState Outbox) TakeNext()
+    {
+        lock (_lock)
+        {
+            if (_queue.First is not { } node)
+            {
+                return (null, _outboxState);
+            }
+
+            _queue.RemoveFirst();
+            if (node.Value.Kind == OutgoingKind.Input)
+            {
+                // Messages leave in order, so the head input is also the oldest queued input.
+                _queuedInputs.Dequeue();
+            }
+
+            return (node.Value, _outboxState);
+        }
+    }
 
     private async Task SendCloseAsync(WebSocketCloseStatus status, string reason)
     {

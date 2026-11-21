@@ -63,6 +63,55 @@ public sealed class ConfigurationTests
     }
 
     [Theory]
+    [InlineData("--port", "--no-tray")]
+    [InlineData("--allow-origin", "--no-tray")]
+    [InlineData("--no-tray", "--port")]
+    [InlineData("--port=", "--no-tray")]
+    public void FlagValueIsNeverAnotherFlag(params string[] args)
+    {
+        var cli = CommandLine.Parse(args);
+
+        var flag = args.First(a => a.StartsWith("--port") || a.StartsWith("--allow-origin")).TrimEnd('=');
+        Assert.Equal($"{flag} needs a value", cli.Error);
+        Assert.Equal(RunMode.Headless, cli.RunMode);
+        Assert.Null(cli.Port);
+    }
+
+    [Theory]
+    [InlineData("http://192.168.1.50:8000")]
+    [InlineData("http://10.0.0.2")]
+    [InlineData("http://172.16.0.1")]
+    [InlineData("http://172.31.255.254")]
+    [InlineData("http://169.254.10.10")]
+    [InlineData("http://100.64.0.1")]
+    [InlineData("http://100.127.255.1")]
+    [InlineData("http://[fd12:3456::1]:8000")]
+    [InlineData("http://[fc00::1]")]
+    [InlineData("http://[fe80::1]")]
+    [InlineData("http://raspberrypi:8000")]
+    [InlineData("http://cnc.local")]
+    [InlineData("http://CNC.LAN:8000")]
+    [InlineData("https://shop.home.arpa")]
+    [InlineData("http://box.internal")]
+    public void LocalNetworkLookingOriginsAreClassifiedForA4403(string origin) =>
+        Assert.Equal(OriginVerdict.DeniedLocalNetwork, new OriginPolicy([]).Classify(origin));
+
+    [Theory]
+    [InlineData("http://evil.example")]
+    [InlineData("https://example.com")]
+    [InlineData("http://localhost.evil.example")]
+    [InlineData("http://local.example.com")]
+    [InlineData("http://8.8.8.8")]
+    [InlineData("http://172.32.0.1")]
+    [InlineData("http://100.128.0.1")]
+    [InlineData("http://[2001:db8::1]")]
+    [InlineData("null")]
+    [InlineData("file://")]
+    [InlineData("ws://raspberrypi")]
+    public void OtherDisallowedOriginsAreClassifiedForAPlain403(string origin) =>
+        Assert.Equal(OriginVerdict.Denied, new OriginPolicy([]).Classify(origin));
+
+    [Theory]
     [InlineData(null, true)]
     [InlineData("", true)]
     [InlineData("http://localhost:8000", true)]

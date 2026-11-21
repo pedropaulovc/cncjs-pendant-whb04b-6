@@ -37,6 +37,13 @@ internal sealed class FakePendantDevice(TimeSpan? chunkTimeout = null, TimeSpan?
 
     public void Detach() => SetState(DeviceState.Detached);
 
+    /// <summary>Simulates discovery reopening the receiver on a fresh handle.</summary>
+    public void Reopen()
+    {
+        BeginSession();
+        SetState(DeviceState.Attached);
+    }
+
     public void EmitInput(params byte[] body) => RaiseInput(body, ReadTimestamp());
 
     public void ReleaseHang() => _release.Set();

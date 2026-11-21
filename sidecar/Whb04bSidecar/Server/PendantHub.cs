@@ -8,7 +8,7 @@ using Whb04bSidecar.Devices;
 namespace Whb04bSidecar.Server;
 
 /// <summary>Snapshot for /health and the tray.</summary>
-internal readonly record struct HubStatus(DeviceState Device, int Clients, string? OwnerOrigin);
+internal readonly record struct HubStatus(DeviceState Device, LcdState Lcd, int Clients, string? OwnerOrigin);
 
 /// <summary>
 /// Connects the device to WebSocket clients: newest connection owns the pendant, input reports go to the
@@ -44,6 +44,7 @@ internal sealed class PendantHub : IDisposable
         _version = version;
         _logger = logger;
         _device.StateChanged += OnDeviceStateChanged;
+        _device.LcdStateChanged += OnLcdStateChanged;
         _device.InputReport += OnInputReport;
         _activityTimer = new Timer(_ => LogActivity(), null, ActivityLogInterval, ActivityLogInterval);
     }
@@ -69,7 +70,7 @@ internal sealed class PendantHub : IDisposable
         {
             lock (_sync)
             {
-                return new HubStatus(_device.State, _clients.Count, _owner?.Origin);
+                return new HubStatus(_device.State, _device.LcdState, _clients.Count, _owner?.Origin);
             }
         }
     }
@@ -122,13 +123,13 @@ internal sealed class PendantHub : IDisposable
             client.Complete();
             await sendLoop.ConfigureAwait(false);
             _logger.LogInformation(
-                "Client #{Client} ({Origin}) disconnected after {Seconds:F0} s: sent close {SentClose}, received close {ReceivedClose}; {Inputs} inputs relayed, {Dropped} dropped (slow client), {Acked} frames acked, {Failed} frames failed",
+                "Client #{Client} ({Origin}) disconnected after {Seconds:F0} s: sent close {SentClose}, received close {ReceivedClose}; {Inputs} inputs relayed, {Dropped} old inputs dropped (slow client), {Acked} frames acked, {Failed} frames failed",
                 client.Id,
                 client.Origin,
                 client.Uptime.Elapsed.TotalSeconds,
                 client.CloseStatusSent is { } sent ? $"{(int)sent} {client.CloseReasonSent}" : "none",
                 closeReceived is { } received ? ((int)received).ToString() : "none",
-                Interlocked.Read(ref client.InputsSent),
+                Interlocked.Read(ref client.InputsQueued) - Interlocked.Read(ref client.InputsDropped),
                 Interlocked.Read(ref client.InputsDropped),
                 Interlocked.Read(ref client.FramesAcked),
                 Interlocked.Read(ref client.FramesFailed));
@@ -152,6 +153,7 @@ internal sealed class PendantHub : IDisposable
     public void Dispose()
     {
         _device.StateChanged -= OnDeviceStateChanged;
+        _device.LcdStateChanged -= OnLcdStateChanged;
         _device.InputReport -= OnInputReport;
         _activityTimer.Dispose();
         LogActivity();
@@ -285,6 +287,12 @@ internal sealed class PendantHub : IDisposable
         StatusChanged?.Invoke();
     }
 
+    private void OnLcdStateChanged(LcdState state)
+    {
+        _logger.LogInformation("LCD state is now {LcdState}", state);
+        StatusChanged?.Invoke();
+    }
+
     private void OnInputReport(PendantInputReport report)
     {
         ClientConnection? owner;
@@ -304,7 +312,8 @@ internal sealed class PendantHub : IDisposable
             case EnqueueResult.Queued:
                 Interlocked.Increment(ref _inputsRelayed);
                 return;
-            case EnqueueResult.DroppedOutboxFull:
+            case EnqueueResult.QueuedDroppedOldest:
+                Interlocked.Increment(ref _inputsRelayed);
                 Interlocked.Increment(ref _inputsDropped);
                 return;
             case EnqueueResult.DroppedClosing:

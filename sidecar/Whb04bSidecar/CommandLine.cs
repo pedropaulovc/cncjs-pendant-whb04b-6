@@ -72,6 +72,12 @@ internal sealed class CommandLine
             {
                 case "--port":
                     var portText = TakeValue(args, ref i, inlineValue);
+                    if (portText is null)
+                    {
+                        result.Fail("--port needs a value");
+                        break;
+                    }
+
                     if (!int.TryParse(portText, out var port) || port is < 0 or > 65535)
                     {
                         result.Fail("--port needs a number between 0 and 65535");
@@ -82,7 +88,13 @@ internal sealed class CommandLine
                     break;
                 case "--allow-origin":
                     var origin = TakeValue(args, ref i, inlineValue);
-                    if (origin is null || !OriginPolicy.TryNormalize(origin, out var normalized))
+                    if (origin is null)
+                    {
+                        result.Fail("--allow-origin needs a value");
+                        break;
+                    }
+
+                    if (!OriginPolicy.TryNormalize(origin, out var normalized))
                     {
                         result.Fail("--allow-origin needs an http(s) origin such as http://cnc.local:8000");
                         break;
@@ -116,6 +128,7 @@ internal sealed class CommandLine
 
     private void Fail(string error) => Error ??= error;
 
+    /// <summary>The flag's value, or null if it has none. A following <c>--flag</c> is never taken as a value.</summary>
     private static string? TakeValue(IReadOnlyList<string> args, ref int index, string? inlineValue)
     {
         if (inlineValue is not null)
@@ -123,7 +136,7 @@ internal sealed class CommandLine
             return inlineValue.Length > 0 ? inlineValue : null;
         }
 
-        if (index + 1 >= args.Count)
+        if (index + 1 >= args.Count || args[index + 1].StartsWith("--", StringComparison.Ordinal))
         {
             return null;
         }

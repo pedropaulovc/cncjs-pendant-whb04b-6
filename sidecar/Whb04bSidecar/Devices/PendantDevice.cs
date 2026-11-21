@@ -24,9 +24,11 @@ internal abstract class PendantDevice : IPendantDevice
     private readonly TimeSpan _stuckWriteGrace;
     private DeviceState _state = DeviceState.Detached;
 
-    // A chunk write that timed out but whose OS call has not returned yet. Guarded by _writeLock.
-    private Task? _abandonedWrite;
-    private long _abandonedAt;
+    // Guarded by _stateLock: a chunk write that timed out but whose OS call has not returned yet, and the LCD state
+    // that follows from it. _session counts device sessions (fresh handles) so a reopen can lift the gate.
+    private AbandonedWrite? _abandoned;
+    private LcdState _lcdState = LcdState.Ok;
+    private long _session;
 
     protected PendantDevice(ILogger logger, TimeSpan? chunkTimeout = null, TimeSpan? stuckWriteGrace = null)
     {
@@ -48,7 +50,20 @@ internal abstract class PendantDevice : IPendantDevice
         }
     }
 
+    public LcdState LcdState
+    {
+        get
+        {
+            lock (_stateLock)
+            {
+                return _lcdState;
+            }
+        }
+    }
+
     public event Action<DeviceState>? StateChanged;
+
+    public event Action<LcdState>? LcdStateChanged;
 
     public event Action<PendantInputReport>? InputReport;
 
@@ -105,6 +120,15 @@ internal abstract class PendantDevice : IPendantDevice
     {
     }
 
+    /// <summary>A fresh device handle was opened. A write stuck on an older handle no longer blocks the LCD for good.</summary>
+    protected void BeginSession()
+    {
+        lock (_stateLock)
+        {
+            _session++;
+        }
+    }
+
     /// <summary>Changes state and raises <see cref="StateChanged"/> only on a real transition.</summary>
     protected void SetState(DeviceState state)
     {
@@ -126,43 +150,60 @@ internal abstract class PendantDevice : IPendantDevice
         InputReport?.Invoke(new PendantInputReport(InputReportId, body, timestamp));
 
     /// <summary>
-    /// After a timeout the abandoned OS call may still complete later and land a stale chunk on the LCD. No new
-    /// frame starts until it has returned; if it is still pending once the grace period since the timeout has
-    /// passed, frames are refused instead of waiting forever.
+    /// After a timeout the abandoned OS call may still complete later and land a stale chunk on the LCD, so no new
+    /// frame starts until it has returned. Once the grace period since the timeout has passed: if the device has
+    /// been reopened since (a new handle), frames resume on it with a warning; otherwise they are refused.
     /// </summary>
     private async Task WaitForAbandonedWriteAsync(CancellationToken cancellationToken)
     {
-        if (_abandonedWrite is null)
+        AbandonedWrite? abandoned;
+        lock (_stateLock)
+        {
+            abandoned = _abandoned;
+        }
+
+        if (abandoned is null)
         {
             return;
         }
 
-        var remaining = _stuckWriteGrace - Stopwatch.GetElapsedTime(_abandonedAt);
+        var remaining = _stuckWriteGrace - Stopwatch.GetElapsedTime(abandoned.StartedAt);
         if (remaining > TimeSpan.Zero)
         {
-            await Task.WhenAny(_abandonedWrite, Task.Delay(remaining, cancellationToken)).ConfigureAwait(false);
+            await Task.WhenAny(abandoned.Write, Task.Delay(remaining, cancellationToken)).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
         }
 
-        var stuckFor = Stopwatch.GetElapsedTime(_abandonedAt);
-        if (!_abandonedWrite.IsCompleted)
+        if (abandoned.Write.IsCompleted)
         {
-            Logger.LogDebug("Refusing LCD frame: abandoned write still pending after {StuckMs} ms", (long)stuckFor.TotalMilliseconds);
+            ClearAbandoned(abandoned);
+            return;
+        }
+
+        var stuckMs = (long)Stopwatch.GetElapsedTime(abandoned.StartedAt).TotalMilliseconds;
+        long session;
+        lock (_stateLock)
+        {
+            session = _session;
+        }
+
+        if (session == abandoned.Session)
+        {
+            Logger.LogDebug("Refusing LCD frame: abandoned write still pending after {StuckMs} ms on the same device handle", stuckMs);
             throw new DisplayWriteException("previous LCD write still stuck");
         }
 
-        Logger.LogInformation(
-            "Abandoned LCD write returned {Outcome} {StuckMs} ms after it was started; LCD writes resume",
-            _abandonedWrite.Status,
-            (long)stuckFor.TotalMilliseconds);
-        _abandonedWrite = null;
+        Logger.LogWarning(
+            "LCD write abandoned {StuckMs} ms ago is still pending on the previous device handle; resuming LCD writes on the reopened device (that late chunk may still reach the LCD)",
+            stuckMs);
+        ClearAbandoned(abandoned);
     }
 
     private async Task WriteChunkAsync(byte[] report, int chunkIndex, CancellationToken cancellationToken)
     {
         // The HID call is synchronous with no timeout of its own, so run it on the pool and stop waiting after the
-        // limit. A hung call keeps its pool thread until the OS call returns; until then every new frame waits or
-        // is refused (WaitForAbandonedWriteAsync), so a late chunk never interleaves with a newer frame.
+        // limit. A hung call keeps its pool thread until the OS call returns; until then new frames wait or are
+        // refused (WaitForAbandonedWriteAsync), unless the device has been reopened on a fresh handle.
         var started = Stopwatch.GetTimestamp();
         var write = Task.Run(() => WriteFeatureReport(report), CancellationToken.None);
         try
@@ -171,10 +212,7 @@ internal abstract class PendantDevice : IPendantDevice
         }
         catch (TimeoutException)
         {
-            // Observe the abandoned write's eventual fault so it never surfaces as an unobserved task exception.
-            _ = write.ContinueWith(static t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
-            _abandonedWrite = write;
-            _abandonedAt = started;
+            Abandon(write, started);
             Logger.LogWarning(
                 "LCD chunk {Chunk}/3 timed out after {TimeoutMs} ms; resetting device",
                 chunkIndex + 1,
@@ -187,4 +225,60 @@ internal abstract class PendantDevice : IPendantDevice
             throw new DisplayWriteException($"HID error on chunk {chunkIndex + 1}/3: {ex.Message}", ex);
         }
     }
+
+    private void Abandon(Task write, long startedAt)
+    {
+        AbandonedWrite abandoned;
+        lock (_stateLock)
+        {
+            abandoned = new AbandonedWrite(write, startedAt, _session);
+            _abandoned = abandoned;
+        }
+
+        SetLcdState(LcdState.Stuck);
+        _ = write.ContinueWith(
+            completed =>
+            {
+                _ = completed.Exception;
+                Logger.LogInformation(
+                    "Abandoned LCD write returned {Outcome} {ElapsedMs} ms after it started",
+                    completed.Status,
+                    (long)Stopwatch.GetElapsedTime(abandoned.StartedAt).TotalMilliseconds);
+                ClearAbandoned(abandoned);
+            },
+            TaskScheduler.Default);
+    }
+
+    /// <summary>Lifts the gate if <paramref name="abandoned"/> is still the current one (a newer timeout replaces it).</summary>
+    private void ClearAbandoned(AbandonedWrite abandoned)
+    {
+        lock (_stateLock)
+        {
+            if (!ReferenceEquals(_abandoned, abandoned))
+            {
+                return;
+            }
+
+            _abandoned = null;
+        }
+
+        SetLcdState(LcdState.Ok);
+    }
+
+    private void SetLcdState(LcdState state)
+    {
+        lock (_stateLock)
+        {
+            if (_lcdState == state)
+            {
+                return;
+            }
+
+            _lcdState = state;
+        }
+
+        LcdStateChanged?.Invoke(state);
+    }
+
+    private sealed record AbandonedWrite(Task Write, long StartedAt, long Session);
 }

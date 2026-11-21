@@ -82,7 +82,13 @@ internal sealed class SidecarHost : IAsyncDisposable
         app.MapGet("/health", () =>
         {
             var status = hub.Status;
-            return Results.Json(new HealthResponse(Protocol.Version, options.Version, Protocol.StateName(status.Device), status.Clients, options.ModeName));
+            return Results.Json(new HealthResponse(
+                Protocol.Version,
+                options.Version,
+                Protocol.StateName(status.Device),
+                status.Clients,
+                options.ModeName,
+                Protocol.LcdName(status.Lcd)));
         });
 
         app.Map(WebSocketPath, async context =>
@@ -96,10 +102,10 @@ internal sealed class SidecarHost : IAsyncDisposable
 
             var origins = context.Request.Headers.Origin;
             using var socket = await context.WebSockets.AcceptWebSocketAsync();
-            if (!IsAllowed(policy, origins))
+            if (Classify(policy, origins) != OriginVerdict.Allowed)
             {
-                // Accepted only so the widget can read the 4403 reason; it never reaches the hub, so it cannot
-                // become owner or supersede anyone.
+                // Only local-network-looking origins get here (the middleware 403s the rest). Accepted only so the
+                // widget can read the 4403 reason; it never reaches the hub, so it cannot become owner or supersede.
                 rejections.Log(origins.ToString(), "WebSocket upgrade (closed 4403)");
                 await OriginRejections.CloseWebSocketAsync(socket, origins.ToString(), context.RequestAborted);
                 return;
@@ -166,20 +172,22 @@ internal sealed class SidecarHost : IAsyncDisposable
         await _app.DisposeAsync().ConfigureAwait(false);
     }
 
-    private static bool IsAllowed(OriginPolicy policy, StringValues origins) =>
-        origins.Count <= 1 && policy.IsAllowed(origins.Count == 1 ? origins[0] : null);
+    private static OriginVerdict Classify(OriginPolicy policy, StringValues origins) =>
+        origins.Count <= 1 ? policy.Classify(origins.Count == 1 ? origins[0] : null) : OriginVerdict.Denied;
 
     private static Task ApplyOriginPolicy(HttpContext context, RequestDelegate next, OriginPolicy policy, OriginRejections rejections)
     {
         var origins = context.Request.Headers.Origin;
-        if (!IsAllowed(policy, origins))
+        var verdict = Classify(policy, origins);
+        // A local-network CNCjs page gets its WebSocket accepted and closed with 4403 by the endpoint, so the widget
+        // can explain the fix. Everything else not allowed gets a plain 403, so public pages cannot fingerprint us.
+        if (verdict == OriginVerdict.DeniedLocalNetwork && context.WebSockets.IsWebSocketRequest && context.Request.Path == WebSocketPath)
         {
-            // WebSocket upgrades are accepted and closed with 4403 by the endpoint; plain HTTP gets 403.
-            if (context.WebSockets.IsWebSocketRequest && context.Request.Path == WebSocketPath)
-            {
-                return next(context);
-            }
+            return next(context);
+        }
 
+        if (verdict != OriginVerdict.Allowed)
+        {
             rejections.Log(origins.ToString(), $"{context.Request.Method} {context.Request.Path} (403)");
             context.Response.StatusCode = StatusCodes.Status403Forbidden;
             return Task.CompletedTask;
@@ -249,5 +257,5 @@ internal sealed class SidecarHost : IAsyncDisposable
             Results.Json(new { frames = device.RecentFrames().Select(frame => frame.Select(b => (int)b).ToArray()).ToArray() }));
     }
 
-    private sealed record HealthResponse(int Protocol, string Version, string Device, int Clients, string Mode);
+    private sealed record HealthResponse(int Protocol, string Version, string Device, int Clients, string Mode, string Lcd);
 }

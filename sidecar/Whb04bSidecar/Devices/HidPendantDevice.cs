@@ -257,6 +257,7 @@ internal sealed class HidPendantDevice : PendantDevice
         }
 
         _lastScanProblem = null;
+        BeginSession();
         Logger.LogInformation(
             "Pendant attached: input {InputPath} (input report {InputLength} bytes); LCD via {LcdKind} on {LcdPath} (feature {FeatureLength} bytes, output {OutputLength} bytes)",
             choice.Input.Path,

@@ -114,10 +114,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
         var simulated = _options.Mode == SidecarMode.Simulated ? " (simulated)" : "";
         var device = attached ? $"Pendant attached{simulated}" : $"Pendant not found{simulated}";
         var client = status.OwnerOrigin is { } origin ? $"Widget connected: {origin}" : "No widget connected";
-        _statusItem.Text = $"{device} · {client}";
-        _notifyIcon.Icon = !attached ? _detachedIcon : status.OwnerOrigin is null ? _idleIcon : _activeIcon;
-        // NotifyIcon.Text is limited to 127 characters.
-        var tooltip = $"WHB04B sidecar :{_host.Port}\n{device}\n{client}";
+        var lcd = status.Lcd == LcdState.Stuck ? "LCD write stuck — unplug/replug the receiver" : "";
+        var lines = new[] { lcd, device, client }.Where(line => line.Length > 0).ToArray();
+        _statusItem.Text = string.Join(" · ", lines);
+        _notifyIcon.Icon = !attached ? _detachedIcon : status.OwnerOrigin is null || status.Lcd == LcdState.Stuck ? _idleIcon : _activeIcon;
+        // NotifyIcon.Text is limited to 127 characters; the LCD warning goes first so it is never cut.
+        var tooltip = string.Join("\n", new[] { lcd.Length > 0 ? lcd : $"WHB04B sidecar :{_host.Port}", device, client });
         _notifyIcon.Text = tooltip.Length <= 127 ? tooltip : tooltip[..127];
     }
 

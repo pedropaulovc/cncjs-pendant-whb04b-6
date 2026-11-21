@@ -10,7 +10,7 @@ namespace Whb04bSidecar.Tests;
 public sealed class ClientConnectionTests
 {
     [Fact]
-    public async Task InputBeyondTheOutboxBoundIsDroppedButControlMessagesAreNot()
+    public async Task FullOutboxDropsTheOldestInputAndNeverControlMessages()
     {
         // The send loop is not running yet, so nothing drains: this is a client that stopped reading.
         var wire = new MemoryStream();
@@ -18,28 +18,53 @@ public sealed class ClientConnectionTests
         using var client = new ClientConnection(1, socket, "none", "test", NullLogger.Instance, CancellationToken.None);
         client.Send(Protocol.Hello("1.0.0", DeviceState.Attached));
 
-        var results = Enumerable.Range(0, 100).Select(i => client.SendInput(Input((byte)i))).ToArray();
+        var results = new List<EnqueueResult>();
+        for (var i = 0; i < 100; i++)
+        {
+            results.Add(client.SendInput(Input((byte)i)));
+            if (i == 10)
+            {
+                client.Send(Protocol.Device(DeviceState.Attached));
+            }
+        }
+
         client.Send(Protocol.Device(DeviceState.Detached));
         client.Send(Protocol.DisplayError(9, "x"));
 
-        Assert.Equal(ClientConnection.MaxPendingInputs, results.Count(r => r == EnqueueResult.Queued));
-        Assert.All(results.Skip(ClientConnection.MaxPendingInputs), r => Assert.Equal(EnqueueResult.DroppedOutboxFull, r));
+        Assert.All(results.Take(ClientConnection.MaxPendingInputs), r => Assert.Equal(EnqueueResult.Queued, r));
+        Assert.All(results.Skip(ClientConnection.MaxPendingInputs), r => Assert.Equal(EnqueueResult.QueuedDroppedOldest, r));
         Assert.Equal(36, Interlocked.Read(ref client.InputsDropped));
         Assert.Equal(ClientConnection.MaxPendingInputs, client.PendingInputs);
 
-        // Draining resumes input; every control message and the 64 oldest inputs go out in order.
+        // Draining resumes input. The newest 64 inputs survive; control messages all go out, in their original order.
         var sendLoop = client.RunSendLoopAsync();
         await WaitUntilAsync(() => client.PendingInputs == 0);
         Assert.Equal(EnqueueResult.Queued, client.SendInput(Input(200)));
         client.Complete();
         await sendLoop;
 
-        var messages = ReadTextFrames(wire.ToArray());
-        Assert.Equal("hello", messages[0].GetProperty("type").GetString());
-        var inputs = messages.Where(m => m.GetProperty("type").GetString() == "input").Select(m => m.GetProperty("data")[0].GetInt32()).ToArray();
-        Assert.Equal([.. Enumerable.Range(0, ClientConnection.MaxPendingInputs), 200], inputs);
-        Assert.Contains(messages, m => m.GetProperty("type").GetString() == "device");
-        Assert.Contains(messages, m => m.GetProperty("type").GetString() == "display:error");
+        var sequence = ReadTextFrames(wire.ToArray()).Select(Describe).ToArray();
+        string[] expected =
+        [
+            "hello",
+            "device:attached",
+            .. Enumerable.Range(36, ClientConnection.MaxPendingInputs).Select(i => $"input:{i}"),
+            "device:detached",
+            "display:error",
+            "input:200",
+        ];
+        Assert.Equal(expected, sequence);
+    }
+
+    private static string Describe(JsonElement message)
+    {
+        var type = message.GetProperty("type").GetString()!;
+        return type switch
+        {
+            "input" => $"input:{message.GetProperty("data")[0].GetInt32()}",
+            "device" => $"device:{message.GetProperty("state").GetString()}",
+            _ => type,
+        };
     }
 
     private static byte[] Input(byte marker) => Protocol.Input(new PendantInputReport(4, [marker, 0, 0, 0, 0, 0, 0], 1));

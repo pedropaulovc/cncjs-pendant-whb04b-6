@@ -6,6 +6,13 @@ internal enum DeviceState
     Attached,
 }
 
+/// <summary>Stuck: a timed-out LCD write has not returned yet, so LCD frames are held back or refused.</summary>
+internal enum LcdState
+{
+    Ok,
+    Stuck,
+}
+
 /// <summary>
 /// One input report: the report ID, exactly the 7 body bytes WebHID delivers as e.data, and when it was read
 /// (<see cref="DateTimeOffset.ToUnixTimeMilliseconds"/> of UtcNow) so clients can discard stale reports.
@@ -25,6 +32,11 @@ internal interface IPendantDevice : IAsyncDisposable
 
     /// <summary>Fired on every attach/detach transition (never twice with the same state).</summary>
     event Action<DeviceState>? StateChanged;
+
+    LcdState LcdState { get; }
+
+    /// <summary>Fired when the LCD becomes stuck (write timed out) or recovers.</summary>
+    event Action<LcdState>? LcdStateChanged;
 
     /// <summary>Fired for every report-ID-0x04 input report read from the device, no dedupe. Raised on a device thread.</summary>
     event Action<PendantInputReport>? InputReport;
