@@ -4,6 +4,10 @@ export const DEFAULT_SIDECAR_URL: string;
 export const SIDECAR_CLOSE_SUPERSEDED: 4001;
 /** Close code the sidecar uses after a malformed client message. */
 export const SIDECAR_CLOSE_MALFORMED: 4400;
+/** Close code for a page origin the sidecar does not allow; never auto-reconnects. */
+export const SIDECAR_CLOSE_FORBIDDEN: 4403;
+/** Input reports whose `t` stamp is further than this from now are stale. */
+export const SIDECAR_STALE_MS: 300;
 
 export const SidecarLink: Readonly<{
   Idle: 'idle';
@@ -12,6 +16,7 @@ export const SidecarLink: Readonly<{
   DeviceMissing: 'device-missing';
   Offline: 'offline';
   Superseded: 'superseded';
+  Forbidden: 'forbidden';
   Incompatible: 'incompatible';
 }>;
 
@@ -21,7 +26,7 @@ export interface SidecarLinkDetail {
   link: SidecarLinkStatus;
   url?: string;
   version?: string | null;
-  /** WebSocket close code, for offline and superseded. */
+  /** WebSocket close code, for offline, superseded, and forbidden. */
   code?: number;
   reason?: string;
   /** Offline cause: never reached, connection lost, or closed for a malformed message (4400). */
@@ -35,11 +40,15 @@ export interface WHB04BSidecarOptions {
   WebSocket?: new (url: string) => WebSocket;
   schedule?: (callback: () => void, ms: number) => unknown;
   cancel?: (id: unknown) => void;
+  /** Wall clock compared with each input report's `t` stamp; defaults to Date.now. */
+  now?: () => number;
 }
 
 /**
  * Same `attach` / `remove` / `use` events as WHB04BWebHID, plus a `link`
- * CustomEvent<SidecarLinkDetail> whenever the sidecar link status changes.
+ * CustomEvent<SidecarLinkDetail> whenever the sidecar link status changes and
+ * a `stale` CustomEvent<{ count: number }> when a burst of stale input reports
+ * ends. Stale reports are delivered as `use` with no keys and no wheel motion.
  */
 export class WHB04BSidecar extends EventTarget {
   constructor(options?: WHB04BSidecarOptions);
@@ -52,7 +61,7 @@ export class WHB04BSidecar extends EventTarget {
   static isSupported(): boolean;
   /** Manual connect; resets backoff and reclaims the sidecar after supersede. */
   connect(url?: string): Promise<boolean>;
-  /** Automatic connect; does nothing after supersede or a protocol mismatch. */
+  /** Automatic connect; does nothing after supersede, a refused origin, or a protocol mismatch. */
   tryReconnect(): Promise<boolean>;
   sendDisplayData(frame: Uint8Array): Promise<void>;
   clearDisplay(): Promise<void>;

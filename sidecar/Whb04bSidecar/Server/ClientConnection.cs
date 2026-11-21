@@ -1,24 +1,44 @@
 using System.Diagnostics;
 using System.Net.WebSockets;
-using System.Text;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 
 namespace Whb04bSidecar.Server;
 
+internal enum ConnectionState
+{
+    Open,
+    Closing,
+}
+
+internal enum EnqueueResult
+{
+    Queued,
+    DroppedOutboxFull,
+    DroppedClosing,
+}
+
 /// <summary>
 /// One WebSocket client. All sends go through a single-reader outbox so the HID thread, the receive loop
-/// and ownership changes never write to the socket concurrently.
+/// and ownership changes never write to the socket concurrently. Input messages are bounded so a slow client
+/// gets fresh reports instead of a growing backlog; control messages are never dropped.
 /// </summary>
 internal sealed class ClientConnection : IDisposable
 {
+    /// <summary>More input messages than this waiting in the outbox → further input is dropped until it drains.</summary>
+    public const int MaxPendingInputs = 64;
+
     /// <summary>How long a client gets to answer our close frame before the socket is aborted.</summary>
     private static readonly TimeSpan CloseHandshakeTimeout = TimeSpan.FromSeconds(3);
 
     private readonly Channel<Outgoing> _outbox = Channel.CreateUnbounded<Outgoing>(new UnboundedChannelOptions { SingleReader = true });
     private readonly CancellationTokenSource _receiveCts;
     private readonly ILogger _logger;
-    private int _closing;
+    private readonly object _lock = new();
+    private ConnectionState _state = ConnectionState.Open;
+    private InputFlow _inputFlow = InputFlow.Flowing;
+    private int _pendingInputs;
+    private long _droppedInBurst;
 
     public ClientConnection(long id, WebSocket socket, string origin, string remote, ILogger logger, CancellationToken requestAborted)
     {
@@ -28,6 +48,19 @@ internal sealed class ClientConnection : IDisposable
         Remote = remote;
         _logger = logger;
         _receiveCts = CancellationTokenSource.CreateLinkedTokenSource(requestAborted);
+    }
+
+    private enum InputFlow
+    {
+        Flowing,
+        Dropping,
+    }
+
+    private enum OutgoingKind
+    {
+        Control,
+        Input,
+        Close,
     }
 
     public long Id { get; }
@@ -44,7 +77,27 @@ internal sealed class ClientConnection : IDisposable
     /// <summary>Cancelled when the close handshake times out or the send side fails; aborts the pending receive.</summary>
     public CancellationToken ReceiveToken => _receiveCts.Token;
 
-    public bool IsClosing => Volatile.Read(ref _closing) == 1;
+    public ConnectionState State
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _state;
+            }
+        }
+    }
+
+    public int PendingInputs
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _pendingInputs;
+            }
+        }
+    }
 
     public WebSocketCloseStatus? CloseStatusSent { get; private set; }
 
@@ -52,22 +105,71 @@ internal sealed class ClientConnection : IDisposable
 
     public long InputsSent;
 
+    public long InputsDropped;
+
     public long FramesAcked;
 
     public long FramesFailed;
 
-    /// <summary>Queues a UTF-8 JSON text frame. Silently dropped once the connection is closing.</summary>
-    public void Send(byte[] utf8Json) => _outbox.Writer.TryWrite(new Outgoing(utf8Json, null, null));
+    /// <summary>Queues a control message (hello, device, display:*, superseded). Dropped only once the connection is closing.</summary>
+    public void Send(byte[] utf8Json) => _outbox.Writer.TryWrite(new Outgoing(OutgoingKind.Control, utf8Json, null, null));
+
+    /// <summary>Queues an input message unless <see cref="MaxPendingInputs"/> are already waiting.</summary>
+    public EnqueueResult SendInput(byte[] utf8Json)
+    {
+        lock (_lock)
+        {
+            if (_state == ConnectionState.Closing)
+            {
+                return EnqueueResult.DroppedClosing;
+            }
+
+            if (_pendingInputs >= MaxPendingInputs)
+            {
+                InputsDropped++;
+                _droppedInBurst++;
+                if (_inputFlow == InputFlow.Flowing)
+                {
+                    _inputFlow = InputFlow.Dropping;
+                    _logger.LogWarning(
+                        "Client #{Client} ({Origin}) has {Pending} input messages queued; dropping input until it catches up",
+                        Id,
+                        Origin,
+                        _pendingInputs);
+                }
+
+                return EnqueueResult.DroppedOutboxFull;
+            }
+
+            if (_inputFlow == InputFlow.Dropping)
+            {
+                _inputFlow = InputFlow.Flowing;
+                _logger.LogWarning("Client #{Client} ({Origin}) caught up; {Dropped} input messages were dropped", Id, Origin, _droppedInBurst);
+                _droppedInBurst = 0;
+            }
+
+            // Written under the lock so Close() cannot complete the outbox between the check and the write.
+            _pendingInputs++;
+            InputsSent++;
+            _outbox.Writer.TryWrite(new Outgoing(OutgoingKind.Input, utf8Json, null, null));
+            return EnqueueResult.Queued;
+        }
+    }
 
     /// <summary>Queues a close frame after everything already queued; later sends are dropped. Idempotent.</summary>
     public void Close(WebSocketCloseStatus status, string reason)
     {
-        if (Interlocked.Exchange(ref _closing, 1) == 1)
+        lock (_lock)
         {
-            return;
+            if (_state == ConnectionState.Closing)
+            {
+                return;
+            }
+
+            _state = ConnectionState.Closing;
         }
 
-        _outbox.Writer.TryWrite(new Outgoing(null, status, TruncateReason(reason)));
+        _outbox.Writer.TryWrite(new Outgoing(OutgoingKind.Close, null, status, Protocol.CloseReason(reason)));
         _outbox.Writer.TryComplete();
     }
 
@@ -80,20 +182,22 @@ internal sealed class ClientConnection : IDisposable
         {
             await foreach (var item in _outbox.Reader.ReadAllAsync().ConfigureAwait(false))
             {
-                if (item.Text is not null)
+                switch (item.Kind)
                 {
-                    await Socket.SendAsync(item.Text, WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None).ConfigureAwait(false);
-                    continue;
+                    case OutgoingKind.Input:
+                        lock (_lock)
+                        {
+                            _pendingInputs--;
+                        }
+
+                        await Socket.SendAsync(item.Text!, WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None).ConfigureAwait(false);
+                        continue;
+                    case OutgoingKind.Control:
+                        await Socket.SendAsync(item.Text!, WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None).ConfigureAwait(false);
+                        continue;
                 }
 
-                CloseStatusSent = item.Status;
-                CloseReasonSent = item.Reason;
-                if (Socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
-                {
-                    await Socket.CloseOutputAsync(item.Status!.Value, item.Reason, CancellationToken.None).ConfigureAwait(false);
-                }
-
-                _receiveCts.CancelAfter(CloseHandshakeTimeout);
+                await SendCloseAsync(item.Status!.Value, item.Reason!).ConfigureAwait(false);
                 return;
             }
         }
@@ -106,22 +210,17 @@ internal sealed class ClientConnection : IDisposable
 
     public void Dispose() => _receiveCts.Dispose();
 
-    /// <summary>WebSocket close reasons are limited to 123 UTF-8 bytes.</summary>
-    private static string TruncateReason(string reason)
+    private async Task SendCloseAsync(WebSocketCloseStatus status, string reason)
     {
-        if (Encoding.UTF8.GetByteCount(reason) <= 123)
+        CloseStatusSent = status;
+        CloseReasonSent = reason;
+        if (Socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
         {
-            return reason;
+            await Socket.CloseOutputAsync(status, reason, CancellationToken.None).ConfigureAwait(false);
         }
 
-        var end = Math.Min(reason.Length, 123);
-        while (Encoding.UTF8.GetByteCount(reason.AsSpan(0, end)) > 123)
-        {
-            end--;
-        }
-
-        return reason[..end];
+        _receiveCts.CancelAfter(CloseHandshakeTimeout);
     }
 
-    private readonly record struct Outgoing(byte[]? Text, WebSocketCloseStatus? Status, string? Reason);
+    private readonly record struct Outgoing(OutgoingKind Kind, byte[]? Text, WebSocketCloseStatus? Status, string? Reason);
 }

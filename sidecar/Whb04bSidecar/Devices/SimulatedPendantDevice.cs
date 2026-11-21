@@ -2,14 +2,19 @@ using Microsoft.Extensions.Logging;
 
 namespace Whb04bSidecar.Devices;
 
+/// <summary>Result of injecting a simulated input report.</summary>
+internal enum InjectResult
+{
+    Relayed,
+    Detached,
+}
+
 /// <summary>
 /// In-process stand-in for the pendant (--simulate): input is injected over HTTP, LCD frames are kept
 /// in a small history instead of going to hardware. Starts attached.
 /// </summary>
 internal sealed class SimulatedPendantDevice(ILogger<SimulatedPendantDevice> logger) : PendantDevice(logger)
 {
-    public const byte InputReportId = 0x04;
-    public const int InputBodyLength = 7;
     public const int FrameHistoryLimit = 50;
 
     private readonly Queue<byte[]> _frames = new();
@@ -28,16 +33,16 @@ internal sealed class SimulatedPendantDevice(ILogger<SimulatedPendantDevice> log
         SetState(DeviceState.Detached);
     }
 
-    /// <summary>Relays a 7-byte input body as if read from the device. Returns false while detached.</summary>
-    public bool InjectInput(byte[] data)
+    /// <summary>Relays a 7-byte input body as if read from the device now. A detached device produces no input.</summary>
+    public InjectResult InjectInput(byte[] body)
     {
         if (State != DeviceState.Attached)
         {
-            return false;
+            return InjectResult.Detached;
         }
 
-        RaiseInput(InputReportId, data);
-        return true;
+        RaiseInput(body, ReadTimestamp());
+        return InjectResult.Relayed;
     }
 
     /// <summary>The last ≤ 50 frames written, most recent last.</summary>

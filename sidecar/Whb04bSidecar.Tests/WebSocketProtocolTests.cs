@@ -41,8 +41,8 @@ public sealed class WebSocketProtocolTests
         using var socket = await server.ConnectOwnerAsync();
         byte[] body = [0x9C, 0x01, 0x00, 0x11, 0x06, 0xFF, 0x7E];
 
-        server.Fake.EmitInput(4, body);
-        server.Fake.EmitInput(4, body);
+        server.Fake.EmitInput(body);
+        server.Fake.EmitInput(body);
 
         foreach (var _ in Enumerable.Range(0, 2))
         {
@@ -50,6 +50,7 @@ public sealed class WebSocketProtocolTests
             Assert.Equal("input", input.GetProperty("type").GetString());
             Assert.Equal(4, input.GetProperty("reportId").GetInt32());
             Assert.Equal(body, Bytes(input.GetProperty("data")));
+            AssertFreshTimestamp(input);
         }
     }
 
@@ -100,9 +101,9 @@ public sealed class WebSocketProtocolTests
     [Fact]
     public async Task ChunkTimeoutRepliesDisplayErrorAndResetsDevice()
     {
-        await using var server = await StartFakeAsync(TimeSpan.FromMilliseconds(200));
+        await using var server = await StartFakeAsync(new FakePendantDevice(TimeSpan.FromMilliseconds(200)));
         using var socket = await server.ConnectOwnerAsync();
-        server.Fake.HangWrites = true;
+        server.Fake.WriteBehavior = FakeWriteBehavior.Hang;
 
         await SendJsonAsync(socket, new { type = "display", id = 7, frame = Frame.Select(b => (int)b) });
         var messages = new[] { await ReceiveJsonAsync(socket), await ReceiveJsonAsync(socket), await ReceiveJsonAsync(socket) };
@@ -121,6 +122,33 @@ public sealed class WebSocketProtocolTests
         Assert.Equal("display:ack", ack.GetProperty("type").GetString());
         Assert.Equal(8, ack.GetProperty("id").GetInt32());
         Assert.Contains("LCD frame 7 from client #1 failed", server.ReadLog());
+    }
+
+    [Fact]
+    public async Task StuckAbandonedWriteBlocksNewFramesUntilItReturns()
+    {
+        await using var server = await StartFakeAsync(new FakePendantDevice(TimeSpan.FromMilliseconds(200), TimeSpan.FromMilliseconds(400)));
+        using var socket = await server.ConnectOwnerAsync();
+        server.Fake.WriteBehavior = FakeWriteBehavior.Hang;
+        await SendJsonAsync(socket, new { type = "display", id = 1, frame = Frame.Select(b => (int)b) });
+        var timeoutMessages = new[] { await ReceiveJsonAsync(socket), await ReceiveJsonAsync(socket), await ReceiveJsonAsync(socket) };
+        Assert.Contains(timeoutMessages, m => m.GetProperty("type").GetString() == "display:error");
+
+        // The abandoned chunk is still blocked: the next frame waits out the grace period, then is refused unwritten.
+        await SendJsonAsync(socket, new { type = "display", id = 2, frame = Frame.Select(b => (int)b) });
+        var refused = await ReceiveJsonAsync(socket);
+        Assert.Equal("display:error", refused.GetProperty("type").GetString());
+        Assert.Equal(2, refused.GetProperty("id").GetInt32());
+        Assert.Equal("previous LCD write still stuck", refused.GetProperty("message").GetString());
+        Assert.Empty(server.Fake.FeatureReports);
+
+        // Once the OS call returns, frames flow again and only whole frames reach the device.
+        server.Fake.ReleaseHang();
+        await SendJsonAsync(socket, new { type = "display", id = 3, frame = Frame.Select(b => (int)b) });
+        var ack = await ReceiveJsonAsync(socket);
+        Assert.Equal("display:ack", ack.GetProperty("type").GetString());
+        Assert.Equal(3, ack.GetProperty("id").GetInt32());
+        Assert.Equal(Frame, server.Fake.FeatureReports.SelectMany(r => r.Skip(1)));
     }
 
     [Fact]
@@ -169,7 +197,7 @@ public sealed class WebSocketProtocolTests
         var superseded = Assert.Single(before);
         Assert.Equal("superseded", superseded.GetProperty("type").GetString());
 
-        server.Fake.EmitInput(4, 1, 2, 3, 4, 5, 6, 7);
+        server.Fake.EmitInput(1, 2, 3, 4, 5, 6, 7);
         var input = await ReceiveJsonAsync(second);
         Assert.Equal("input", input.GetProperty("type").GetString());
 

@@ -40,8 +40,8 @@ internal sealed class SidecarTestServer : IAsyncDisposable
 
     public Uri WebSocketUri => new($"ws://127.0.0.1:{_host.Port}{SidecarHost.WebSocketPath}");
 
-    public static Task<SidecarTestServer> StartFakeAsync(TimeSpan? chunkTimeout = null, params string[] allowedOrigins) =>
-        StartAsync(new FakePendantDevice(chunkTimeout), SidecarMode.Hid, allowedOrigins);
+    public static Task<SidecarTestServer> StartFakeAsync(FakePendantDevice? device = null, params string[] allowedOrigins) =>
+        StartAsync(device ?? new FakePendantDevice(), SidecarMode.Hid, allowedOrigins);
 
     public static Task<SidecarTestServer> StartSimulatedAsync() =>
         StartAsync(new SimulatedPendantDevice(NullLogger<SimulatedPendantDevice>.Instance), SidecarMode.Simulated, []);
@@ -126,6 +126,13 @@ internal sealed class SidecarTestServer : IAsyncDisposable
     }
 
     public static byte[] Bytes(JsonElement array) => array.EnumerateArray().Select(e => (byte)e.GetInt32()).ToArray();
+
+    /// <summary>The input's <c>t</c> is a Unix-ms read time from this machine's clock, i.e. close to now.</summary>
+    public static void AssertFreshTimestamp(JsonElement input)
+    {
+        var age = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - input.GetProperty("t").GetInt64();
+        Assert.InRange(age, 0, 5000);
+    }
 
     private static async Task<(WebSocketMessageType Type, string Text)> ReceiveAsync(ClientWebSocket socket)
     {

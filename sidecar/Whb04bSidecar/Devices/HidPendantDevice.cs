@@ -5,6 +5,19 @@ using Microsoft.Extensions.Logging;
 
 namespace Whb04bSidecar.Devices;
 
+/// <summary>Capabilities of one HID interface of the receiver, as reported by Windows.</summary>
+internal readonly record struct HidInterfaceInfo(string Path, int InputLength, int OutputLength, int FeatureLength);
+
+/// <summary>How the LCD interface was picked: the expected feature-report interface, or an output-only fallback.</summary>
+internal enum LcdInterfaceKind
+{
+    Feature,
+    OutputFallback,
+}
+
+/// <summary>The interfaces to open: one for input reports, one for LCD feature reports (may be the same path).</summary>
+internal readonly record struct HidInterfaceChoice(HidInterfaceInfo Input, HidInterfaceInfo Lcd, LcdInterfaceKind LcdKind);
+
 /// <summary>
 /// The real WHB04B-6 receiver (VID 0x10CE, PID 0xEB93) via the Windows HID API (HidSharp).
 /// A dedicated thread blocks on reads so every report is forwarded; hot-plug is tracked through
@@ -20,16 +33,28 @@ internal sealed class HidPendantDevice : PendantDevice
     private static readonly TimeSpan ReopenDelay = TimeSpan.FromMilliseconds(500);
 
     private readonly object _sessionLock = new();
+    private readonly object _scanGate = new();
     private readonly Timer _scanTimer;
     private HidSession? _session;
-    private int _scanning;
-    private bool _disposed;
+    private DeviceLifecycle _lifecycle = DeviceLifecycle.Running;
     private string? _lastScanProblem;
 
     public HidPendantDevice(ILogger<HidPendantDevice> logger)
         : base(logger)
     {
         _scanTimer = new Timer(_ => Scan(), null, Timeout.Infinite, Timeout.Infinite);
+    }
+
+    private enum DeviceLifecycle
+    {
+        Running,
+        Disposed,
+    }
+
+    private enum SessionState
+    {
+        Open,
+        Closed,
     }
 
     public override void Start()
@@ -43,7 +68,7 @@ internal sealed class HidPendantDevice : PendantDevice
         HidSession? session;
         lock (_sessionLock)
         {
-            _disposed = true;
+            _lifecycle = DeviceLifecycle.Disposed;
             session = _session;
             _session = null;
         }
@@ -52,6 +77,49 @@ internal sealed class HidPendantDevice : PendantDevice
         await _scanTimer.DisposeAsync().ConfigureAwait(false);
         session?.Close();
         await base.DisposeAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Picks the first input-capable interface, and for the LCD the first interface with feature reports (the write
+    /// path is SetFeature). Only when no interface has feature reports does it fall back to an output-capable one.
+    /// </summary>
+    public static HidInterfaceChoice? ChooseInterfaces(IReadOnlyList<HidInterfaceInfo> interfaces)
+    {
+        var input = interfaces.FirstOrDefault(i => i.InputLength > 0);
+        if (input.Path is null)
+        {
+            return null;
+        }
+
+        var feature = interfaces.FirstOrDefault(i => i.FeatureLength > 0);
+        if (feature.Path is not null)
+        {
+            return new HidInterfaceChoice(input, feature, LcdInterfaceKind.Feature);
+        }
+
+        var output = interfaces.FirstOrDefault(i => i.OutputLength > 0);
+        if (output.Path is null)
+        {
+            return null;
+        }
+
+        return new HidInterfaceChoice(input, output, LcdInterfaceKind.OutputFallback);
+    }
+
+    /// <summary>
+    /// Extracts the 7-byte body of a report-ID-0x04 read (<paramref name="raw"/> includes the report ID). Windows may
+    /// return a longer, zero-padded report; anything with another ID or fewer than 8 bytes is not a pendant report.
+    /// </summary>
+    public static bool TryReadInputBody(ReadOnlySpan<byte> raw, out byte[] body)
+    {
+        body = [];
+        if (raw.Length < InputBodyLength + 1 || raw[0] != InputReportId)
+        {
+            return false;
+        }
+
+        body = raw.Slice(1, InputBodyLength).ToArray();
+        return true;
     }
 
     protected override void WriteFeatureReport(byte[] report)
@@ -73,10 +141,12 @@ internal sealed class HidPendantDevice : PendantDevice
             session = _session;
         }
 
-        if (session is not null)
+        if (session is null)
         {
-            Detach(session, "LCD write timeout");
+            return;
         }
+
+        Detach(session, "LCD write timeout");
     }
 
     private void OnDeviceListChanged(object? sender, DeviceListChangedEventArgs e)
@@ -84,7 +154,7 @@ internal sealed class HidPendantDevice : PendantDevice
         // Windows fires several notifications per plug event; a short settle delay coalesces them into one scan.
         lock (_sessionLock)
         {
-            if (_disposed)
+            if (_lifecycle == DeviceLifecycle.Disposed)
             {
                 return;
             }
@@ -95,7 +165,8 @@ internal sealed class HidPendantDevice : PendantDevice
 
     private void Scan()
     {
-        if (Interlocked.Exchange(ref _scanning, 1) == 1)
+        // Timer callbacks can overlap; one scan at a time is enough.
+        if (!Monitor.TryEnter(_scanGate))
         {
             return;
         }
@@ -104,7 +175,7 @@ internal sealed class HidPendantDevice : PendantDevice
         {
             lock (_sessionLock)
             {
-                if (_disposed || _session is not null)
+                if (_lifecycle == DeviceLifecycle.Disposed || _session is not null)
                 {
                     return;
                 }
@@ -118,7 +189,7 @@ internal sealed class HidPendantDevice : PendantDevice
         }
         finally
         {
-            Volatile.Write(ref _scanning, 0);
+            Monitor.Exit(_scanGate);
         }
     }
 
@@ -131,42 +202,37 @@ internal sealed class HidPendantDevice : PendantDevice
             return;
         }
 
-        HidDevice? inputDevice = null;
-        HidDevice? featureDevice = null;
+        var interfaces = new List<HidInterfaceInfo>();
         foreach (var candidate in candidates)
         {
-            try
+            var info = DescribeInterface(candidate);
+            if (info is not null)
             {
-                if (inputDevice is null && candidate.GetMaxInputReportLength() > 0)
-                {
-                    inputDevice = candidate;
-                }
-
-                if (featureDevice is null && (candidate.GetMaxFeatureReportLength() > 0 || candidate.GetMaxOutputReportLength() > 0))
-                {
-                    featureDevice = candidate;
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.LogDebug(ex, "Skipping HID interface {Path}: cannot read capabilities", candidate.DevicePath);
+                interfaces.Add(info.Value);
             }
         }
 
-        if (inputDevice is null || featureDevice is null)
+        if (ChooseInterfaces(interfaces) is not { } choice)
         {
             ReportScanProblem(
-                $"WHB04B-6 found ({candidates.Count} interface(s)) but missing an {(inputDevice is null ? "input" : "feature")}-capable interface",
+                $"WHB04B-6 found ({candidates.Count} interface(s)) but no input-capable plus feature/output-capable interface",
                 null);
             return;
         }
 
+        if (choice.LcdKind == LcdInterfaceKind.OutputFallback)
+        {
+            Logger.LogWarning("No HID interface reports feature reports; LCD falls back to output-capable {Path} and SetFeature may fail", choice.Lcd.Path);
+        }
+
+        var inputDevice = candidates.First(c => c.DevicePath == choice.Input.Path);
+        var lcdDevice = candidates.First(c => c.DevicePath == choice.Lcd.Path);
         HidStream? input = null;
         HidStream? output = null;
         try
         {
             input = inputDevice.Open();
-            output = featureDevice.Open();
+            output = lcdDevice.Open();
             // Block until a report arrives; closing the stream (detach/shutdown) is what ends the wait.
             input.ReadTimeout = Timeout.Infinite;
         }
@@ -178,10 +244,10 @@ internal sealed class HidPendantDevice : PendantDevice
             return;
         }
 
-        var session = new HidSession(input, output, inputDevice.DevicePath, featureDevice.DevicePath, inputDevice.GetMaxInputReportLength());
+        var session = new HidSession(input, output, choice.Input.Path, choice.Input.InputLength);
         lock (_sessionLock)
         {
-            if (_disposed)
+            if (_lifecycle == DeviceLifecycle.Disposed)
             {
                 session.Close();
                 return;
@@ -192,11 +258,13 @@ internal sealed class HidPendantDevice : PendantDevice
 
         _lastScanProblem = null;
         Logger.LogInformation(
-            "Pendant attached: input {InputPath} (report {InputLength} bytes), LCD {OutputPath} (feature {FeatureLength} bytes)",
-            session.InputPath,
-            session.InputReportLength,
-            session.OutputPath,
-            featureDevice.GetMaxFeatureReportLength());
+            "Pendant attached: input {InputPath} (input report {InputLength} bytes); LCD via {LcdKind} on {LcdPath} (feature {FeatureLength} bytes, output {OutputLength} bytes)",
+            choice.Input.Path,
+            choice.Input.InputLength,
+            choice.LcdKind,
+            choice.Lcd.Path,
+            choice.Lcd.FeatureLength,
+            choice.Lcd.OutputLength);
 
         // Announce the attach before the first report can be relayed.
         SetState(DeviceState.Attached);
@@ -209,9 +277,33 @@ internal sealed class HidPendantDevice : PendantDevice
         reader.Start();
     }
 
+    private HidInterfaceInfo? DescribeInterface(HidDevice device)
+    {
+        try
+        {
+            var info = new HidInterfaceInfo(
+                device.DevicePath,
+                device.GetMaxInputReportLength(),
+                device.GetMaxOutputReportLength(),
+                device.GetMaxFeatureReportLength());
+            Logger.LogDebug(
+                "HID interface {Path}: input {Input}, output {Output}, feature {Feature} bytes",
+                info.Path,
+                info.InputLength,
+                info.OutputLength,
+                info.FeatureLength);
+            return info;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "Skipping HID interface {Path}: cannot read capabilities", device.DevicePath);
+            return null;
+        }
+    }
+
     private void ReadLoop(HidSession session)
     {
-        var buffer = new byte[Math.Max(session.InputReportLength, 2)];
+        var buffer = new byte[Math.Max(session.InputReportLength, InputBodyLength + 1)];
         while (true)
         {
             int count;
@@ -221,7 +313,7 @@ internal sealed class HidPendantDevice : PendantDevice
             }
             catch (Exception ex)
             {
-                if (session.IsClosed)
+                if (session.State == SessionState.Closed)
                 {
                     return;
                 }
@@ -231,26 +323,34 @@ internal sealed class HidPendantDevice : PendantDevice
                 return;
             }
 
-            if (count <= 1)
+            var timestamp = ReadTimestamp();
+            if (count == 0)
             {
-                if (session.IsClosed)
+                if (session.State == SessionState.Closed)
                 {
                     return;
                 }
 
-                Logger.LogWarning("HID read returned {Count} bytes on {Path}; treating as detach", count, session.InputPath);
+                Logger.LogWarning("HID read returned 0 bytes on {Path}; treating as detach", session.InputPath);
                 Detach(session, "empty read");
                 return;
             }
 
-            Interlocked.Increment(ref session.ReportCount);
-            var data = buffer.AsSpan(1, count - 1).ToArray();
-            if (Logger.IsEnabled(LogLevel.Trace))
+            var raw = buffer.AsSpan(0, count);
+            if (!TryReadInputBody(raw, out var body))
             {
-                Logger.LogTrace("HID input report {ReportId}: {Data}", buffer[0], Convert.ToHexString(data));
+                Interlocked.Increment(ref session.IgnoredCount);
+                Logger.LogDebug("Ignoring HID input {Count} bytes with report ID {ReportId}: {Data}", count, raw[0], Convert.ToHexString(raw));
+                continue;
             }
 
-            RaiseInput(buffer[0], data);
+            Interlocked.Increment(ref session.ReportCount);
+            if (Logger.IsEnabled(LogLevel.Trace))
+            {
+                Logger.LogTrace("HID input report: {Data}", Convert.ToHexString(body));
+            }
+
+            RaiseInput(body, timestamp);
         }
     }
 
@@ -264,7 +364,7 @@ internal sealed class HidPendantDevice : PendantDevice
             }
 
             _session = null;
-            if (!_disposed)
+            if (_lifecycle == DeviceLifecycle.Running)
             {
                 _scanTimer.Change(ReopenDelay, RescanInterval);
             }
@@ -272,10 +372,11 @@ internal sealed class HidPendantDevice : PendantDevice
 
         session.Close();
         Logger.LogInformation(
-            "Pendant detached ({Reason}): {InputPath}; {Reports} input reports over {Seconds:F0} s",
+            "Pendant detached ({Reason}): {InputPath}; {Reports} input reports ({Ignored} ignored) over {Seconds:F0} s",
             reason,
             session.InputPath,
             Interlocked.Read(ref session.ReportCount),
+            Interlocked.Read(ref session.IgnoredCount),
             session.Uptime.Elapsed.TotalSeconds);
         SetState(DeviceState.Detached);
     }
@@ -298,11 +399,14 @@ internal sealed class HidPendantDevice : PendantDevice
         Logger.LogWarning(ex, "{Message}", message);
     }
 
-    private sealed class HidSession(HidStream input, HidStream output, string inputPath, string outputPath, int inputReportLength)
+    private sealed class HidSession(HidStream input, HidStream output, string inputPath, int inputReportLength)
     {
-        private int _closed;
+        private readonly object _stateLock = new();
+        private SessionState _state = SessionState.Open;
 
         public long ReportCount;
+
+        public long IgnoredCount;
 
         public HidStream Input { get; } = input;
 
@@ -310,19 +414,31 @@ internal sealed class HidPendantDevice : PendantDevice
 
         public string InputPath { get; } = inputPath;
 
-        public string OutputPath { get; } = outputPath;
-
         public int InputReportLength { get; } = inputReportLength;
 
         public Stopwatch Uptime { get; } = Stopwatch.StartNew();
 
-        public bool IsClosed => Volatile.Read(ref _closed) == 1;
+        public SessionState State
+        {
+            get
+            {
+                lock (_stateLock)
+                {
+                    return _state;
+                }
+            }
+        }
 
         public void Close()
         {
-            if (Interlocked.Exchange(ref _closed, 1) == 1)
+            lock (_stateLock)
             {
-                return;
+                if (_state == SessionState.Closed)
+                {
+                    return;
+                }
+
+                _state = SessionState.Closed;
             }
 
             // Closing the streams unblocks the reader's pending Read with an exception, which then exits quietly.

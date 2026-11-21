@@ -11,11 +11,12 @@ using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Primitives;
 using Whb04bSidecar.Devices;
 
 namespace Whb04bSidecar.Server;
 
-/// <summary>Thrown by <see cref="SidecarHost.StartAsync"/> when the port is taken (typically another sidecar).</summary>
+/// <summary>Thrown by <see cref="SidecarHost.StartAsync"/> when the port is taken (typically another sidecar) or reserved.</summary>
 internal sealed class PortInUseException(int port, Exception inner)
     : Exception($"Port {port} on 127.0.0.1 is already in use or reserved (is another sidecar running?). Use --port or \"port\" in settings.json to pick another.", inner)
 {
@@ -29,7 +30,7 @@ internal sealed class SidecarHost : IAsyncDisposable
 
     private readonly WebApplication _app;
     private readonly SidecarOptions _options;
-    private bool _started;
+    private HostState _state = HostState.Created;
 
     private SidecarHost(WebApplication app, SidecarOptions options, IPendantDevice device, PendantHub hub)
     {
@@ -37,6 +38,13 @@ internal sealed class SidecarHost : IAsyncDisposable
         _options = options;
         Device = device;
         Hub = hub;
+    }
+
+    private enum HostState
+    {
+        Created,
+        Started,
+        Stopped,
     }
 
     public IPendantDevice Device { get; }
@@ -66,10 +74,10 @@ internal sealed class SidecarHost : IAsyncDisposable
         var app = builder.Build();
         var hub = new PendantHub(device, options.Version, loggerFactory.CreateLogger<PendantHub>());
         var policy = new OriginPolicy(options.AllowedOrigins);
-        var log = loggerFactory.CreateLogger<SidecarHost>();
+        var rejections = new OriginRejections(loggerFactory.CreateLogger<OriginRejections>());
 
-        app.Use((context, next) => ApplyOriginPolicy(context, next, policy, log));
         app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(15) });
+        app.Use((context, next) => ApplyOriginPolicy(context, next, policy, rejections));
 
         app.MapGet("/health", () =>
         {
@@ -86,9 +94,19 @@ internal sealed class SidecarHost : IAsyncDisposable
                 return;
             }
 
+            var origins = context.Request.Headers.Origin;
             using var socket = await context.WebSockets.AcceptWebSocketAsync();
+            if (!IsAllowed(policy, origins))
+            {
+                // Accepted only so the widget can read the 4403 reason; it never reaches the hub, so it cannot
+                // become owner or supersede anyone.
+                rejections.Log(origins.ToString(), "WebSocket upgrade (closed 4403)");
+                await OriginRejections.CloseWebSocketAsync(socket, origins.ToString(), context.RequestAborted);
+                return;
+            }
+
             var remote = $"{context.Connection.RemoteIpAddress}:{context.Connection.RemotePort}";
-            await hub.RunClientAsync(socket, context.Request.Headers.Origin.ToString(), remote, context.RequestAborted);
+            await hub.RunClientAsync(socket, origins.ToString(), remote, context.RequestAborted);
         });
 
         if (device is SimulatedPendantDevice simulated)
@@ -100,18 +118,30 @@ internal sealed class SidecarHost : IAsyncDisposable
         return new SidecarHost(app, options, device, hub);
     }
 
+    /// <summary>Bind failures that mean "pick another port": in use (WSAEADDRINUSE) or excluded/reserved (WSAEACCES).</summary>
+    public static bool IsPortUnavailable(Exception exception)
+    {
+        var cause = exception is IOException { InnerException: { } inner } ? inner : exception;
+        return cause switch
+        {
+            AddressInUseException => true,
+            SocketException { SocketErrorCode: SocketError.AddressAlreadyInUse or SocketError.AccessDenied } => true,
+            _ => false,
+        };
+    }
+
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
         try
         {
             await _app.StartAsync(cancellationToken).ConfigureAwait(false);
         }
-        catch (IOException ex) when (ex.InnerException is AddressInUseException || ex.InnerException is SocketException { SocketErrorCode: SocketError.AddressAlreadyInUse or SocketError.AccessDenied })
+        catch (Exception ex) when (IsPortUnavailable(ex))
         {
             throw new PortInUseException(_options.Port, ex);
         }
 
-        _started = true;
+        _state = HostState.Started;
         var addresses = _app.Services.GetRequiredService<IServer>().Features.GetRequiredFeature<IServerAddressesFeature>().Addresses;
         Port = new Uri(addresses.First()).Port;
         Device.Start();
@@ -119,11 +149,13 @@ internal sealed class SidecarHost : IAsyncDisposable
 
     public async Task StopAsync()
     {
-        if (_started)
+        if (_state != HostState.Started)
         {
-            _started = false;
-            await _app.StopAsync().ConfigureAwait(false);
+            return;
         }
+
+        _state = HostState.Stopped;
+        await _app.StopAsync().ConfigureAwait(false);
     }
 
     public async ValueTask DisposeAsync()
@@ -134,17 +166,26 @@ internal sealed class SidecarHost : IAsyncDisposable
         await _app.DisposeAsync().ConfigureAwait(false);
     }
 
-    private static Task ApplyOriginPolicy(HttpContext context, RequestDelegate next, OriginPolicy policy, ILogger log)
+    private static bool IsAllowed(OriginPolicy policy, StringValues origins) =>
+        origins.Count <= 1 && policy.IsAllowed(origins.Count == 1 ? origins[0] : null);
+
+    private static Task ApplyOriginPolicy(HttpContext context, RequestDelegate next, OriginPolicy policy, OriginRejections rejections)
     {
         var origins = context.Request.Headers.Origin;
-        var origin = origins.Count == 1 ? origins[0] : null;
-        if (origins.Count > 1 || !policy.IsAllowed(origin))
+        if (!IsAllowed(policy, origins))
         {
-            log.LogWarning("Rejected {Method} {Path} from origin {Origin} (403)", context.Request.Method, context.Request.Path, origins.ToString());
+            // WebSocket upgrades are accepted and closed with 4403 by the endpoint; plain HTTP gets 403.
+            if (context.WebSockets.IsWebSocketRequest && context.Request.Path == WebSocketPath)
+            {
+                return next(context);
+            }
+
+            rejections.Log(origins.ToString(), $"{context.Request.Method} {context.Request.Path} (403)");
             context.Response.StatusCode = StatusCodes.Status403Forbidden;
             return Task.CompletedTask;
         }
 
+        var origin = origins.ToString();
         if (string.IsNullOrEmpty(origin))
         {
             return next(context);
@@ -170,14 +211,14 @@ internal sealed class SidecarHost : IAsyncDisposable
     {
         app.MapPost("/simulate/input", async (HttpRequest request) =>
         {
-            byte[] data;
+            byte[] body;
             try
             {
-                using var body = await JsonDocument.ParseAsync(request.Body);
-                if (body.RootElement.ValueKind != JsonValueKind.Object
-                    || !Protocol.TryReadBytes(body.RootElement, "data", SimulatedPendantDevice.InputBodyLength, out data))
+                using var json = await JsonDocument.ParseAsync(request.Body);
+                if (json.RootElement.ValueKind != JsonValueKind.Object
+                    || !Protocol.TryReadBytes(json.RootElement, "data", PendantDevice.InputBodyLength, out body))
                 {
-                    return Results.BadRequest(new { error = $"body must be {{\"data\":[{SimulatedPendantDevice.InputBodyLength} integers 0-255]}}" });
+                    return Results.BadRequest(new { error = $"body must be {{\"data\":[{PendantDevice.InputBodyLength} integers 0-255]}}" });
                 }
             }
             catch (JsonException)
@@ -185,9 +226,11 @@ internal sealed class SidecarHost : IAsyncDisposable
                 return Results.BadRequest(new { error = "invalid JSON" });
             }
 
-            return device.InjectInput(data)
-                ? Results.Ok(new { relayed = true })
-                : Results.Conflict(new { error = "simulated device is detached" });
+            return device.InjectInput(body) switch
+            {
+                InjectResult.Relayed => Results.Ok(new { relayed = true }),
+                _ => Results.Conflict(new { error = "simulated device is detached" }),
+            };
         });
 
         app.MapPost("/simulate/detach", () =>

@@ -451,8 +451,8 @@ export class Grbl {
     const words = this.jogWords(distance, feed, max, units);
     if (!words) return this.refuse('Jog: distance/feed rounds to zero or is unrepresentable in the current program units.');
     // At most one owned line awaits the controller's reply; later wheel input on
-    // the same axis merges and goes out once that reply arrives. Input arriving
-    // before the timer sends the merge joins it, keeping detents in order.
+    // the same axis merges and goes out as soon as that reply message arrives,
+    // keeping detents in order.
     if (this.jogBacklog?.axis === axis
       || (['active', 'armed'].includes(this.jogPhase) && this.jogAxis === axis && this.jogAwaitingReply())) {
       return this.bufferJog(axis, distance, feed);

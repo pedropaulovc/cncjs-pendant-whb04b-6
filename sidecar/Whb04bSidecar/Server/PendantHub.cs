@@ -16,8 +16,6 @@ internal readonly record struct HubStatus(DeviceState Device, int Clients, strin
 /// </summary>
 internal sealed class PendantHub : IDisposable
 {
-    public const WebSocketCloseStatus SupersededCloseStatus = (WebSocketCloseStatus)4001;
-    public const WebSocketCloseStatus MalformedCloseStatus = (WebSocketCloseStatus)4400;
     private const int MaxMessageBytes = 16 * 1024;
     private static readonly TimeSpan ActivityLogInterval = TimeSpan.FromMinutes(1);
 
@@ -29,10 +27,11 @@ internal sealed class PendantHub : IDisposable
     private readonly Timer _activityTimer;
     private ClientConnection? _owner;
     private long _nextClientId;
-    private bool _stopping;
+    private HubState _state = HubState.Running;
 
     // Activity window, logged once a minute when non-empty.
     private long _inputsRelayed;
+    private long _inputsDropped;
     private long _inputsWithoutOwner;
     private long _framesOk;
     private long _framesFailed;
@@ -47,6 +46,18 @@ internal sealed class PendantHub : IDisposable
         _device.StateChanged += OnDeviceStateChanged;
         _device.InputReport += OnInputReport;
         _activityTimer = new Timer(_ => LogActivity(), null, ActivityLogInterval, ActivityLogInterval);
+    }
+
+    private enum HubState
+    {
+        Running,
+        Stopping,
+    }
+
+    private enum Registration
+    {
+        Owner,
+        Refused,
     }
 
     /// <summary>Raised (on an arbitrary thread) when device state, client count or owner changes.</summary>
@@ -74,22 +85,12 @@ internal sealed class PendantHub : IDisposable
             _logger,
             requestAborted);
 
-        ClientConnection? previous;
-        lock (_sync)
+        if (Register(client, out var previous) == Registration.Refused)
         {
-            if (_stopping)
-            {
-                client.Close(WebSocketCloseStatus.EndpointUnavailable, "sidecar shutting down");
-                previous = null;
-            }
-            else
-            {
-                previous = _owner;
-                _owner = client;
-                _clients.Add(client);
-                // Under the lock so hello is always first: device/input events only reach the owner via this lock.
-                client.Send(Protocol.Hello(_version, _device.State));
-            }
+            _logger.LogInformation("Client #{Client} from origin {Origin} refused: shutting down", client.Id, client.Origin);
+            client.Close(WebSocketCloseStatus.EndpointUnavailable, "sidecar shutting down");
+            await client.RunSendLoopAsync().ConfigureAwait(false);
+            return;
         }
 
         _logger.LogInformation("Client #{Client} connected from origin {Origin} ({Remote})", client.Id, client.Origin, remote);
@@ -101,7 +102,7 @@ internal sealed class PendantHub : IDisposable
                 previous.Origin,
                 client.Id);
             previous.Send(Protocol.Superseded());
-            previous.Close(SupersededCloseStatus, "superseded by a newer connection");
+            previous.Close(Protocol.SupersededCloseStatus, "superseded by a newer connection");
         }
 
         StatusChanged?.Invoke();
@@ -117,25 +118,18 @@ internal sealed class PendantHub : IDisposable
         }
         finally
         {
-            lock (_sync)
-            {
-                _clients.Remove(client);
-                if (ReferenceEquals(_owner, client))
-                {
-                    _owner = null;
-                }
-            }
-
+            Unregister(client);
             client.Complete();
             await sendLoop.ConfigureAwait(false);
             _logger.LogInformation(
-                "Client #{Client} ({Origin}) disconnected after {Seconds:F0} s: sent close {SentClose}, received close {ReceivedClose}; {Inputs} inputs relayed, {Acked} frames acked, {Failed} frames failed",
+                "Client #{Client} ({Origin}) disconnected after {Seconds:F0} s: sent close {SentClose}, received close {ReceivedClose}; {Inputs} inputs relayed, {Dropped} dropped (slow client), {Acked} frames acked, {Failed} frames failed",
                 client.Id,
                 client.Origin,
                 client.Uptime.Elapsed.TotalSeconds,
                 client.CloseStatusSent is { } sent ? $"{(int)sent} {client.CloseReasonSent}" : "none",
                 closeReceived is { } received ? ((int)received).ToString() : "none",
                 Interlocked.Read(ref client.InputsSent),
+                Interlocked.Read(ref client.InputsDropped),
                 Interlocked.Read(ref client.FramesAcked),
                 Interlocked.Read(ref client.FramesFailed));
             StatusChanged?.Invoke();
@@ -147,7 +141,7 @@ internal sealed class PendantHub : IDisposable
     {
         lock (_sync)
         {
-            _stopping = true;
+            _state = HubState.Stopping;
             foreach (var client in _clients)
             {
                 client.Close(WebSocketCloseStatus.EndpointUnavailable, "sidecar shutting down");
@@ -161,6 +155,38 @@ internal sealed class PendantHub : IDisposable
         _device.InputReport -= OnInputReport;
         _activityTimer.Dispose();
         LogActivity();
+    }
+
+    /// <summary>Makes <paramref name="client"/> the owner and queues its hello; <paramref name="previous"/> is the owner it replaces.</summary>
+    private Registration Register(ClientConnection client, out ClientConnection? previous)
+    {
+        lock (_sync)
+        {
+            previous = null;
+            if (_state == HubState.Stopping)
+            {
+                return Registration.Refused;
+            }
+
+            previous = _owner;
+            _owner = client;
+            _clients.Add(client);
+            // Under the lock so hello is always first: device/input events only reach the owner via this lock.
+            client.Send(Protocol.Hello(_version, _device.State));
+            return Registration.Owner;
+        }
+    }
+
+    private void Unregister(ClientConnection client)
+    {
+        lock (_sync)
+        {
+            _clients.Remove(client);
+            if (ReferenceEquals(_owner, client))
+            {
+                _owner = null;
+            }
+        }
     }
 
     /// <summary>Returns the close status the client sent, or null if the socket ended without one.</summary>
@@ -179,7 +205,7 @@ internal sealed class PendantHub : IDisposable
             }
 
             // After we started closing, drain whatever the client still sends until its close frame arrives.
-            if (client.IsClosing)
+            if (client.State == ConnectionState.Closing)
             {
                 continue;
             }
@@ -218,7 +244,7 @@ internal sealed class PendantHub : IDisposable
     private void Reject(ClientConnection client, string reason)
     {
         _logger.LogWarning("Client #{Client} ({Origin}) sent a malformed message: {Reason}; closing 4400", client.Id, client.Origin, reason);
-        client.Close(MalformedCloseStatus, reason);
+        client.Close(Protocol.MalformedCloseStatus, reason);
     }
 
     private async Task WriteFrameAsync(ClientConnection client, DisplayRequest request)
@@ -273,27 +299,38 @@ internal sealed class PendantHub : IDisposable
             return;
         }
 
-        owner.Send(Protocol.Input(report));
-        Interlocked.Increment(ref owner.InputsSent);
-        Interlocked.Increment(ref _inputsRelayed);
+        switch (owner.SendInput(Protocol.Input(report)))
+        {
+            case EnqueueResult.Queued:
+                Interlocked.Increment(ref _inputsRelayed);
+                return;
+            case EnqueueResult.DroppedOutboxFull:
+                Interlocked.Increment(ref _inputsDropped);
+                return;
+            case EnqueueResult.DroppedClosing:
+                Interlocked.Increment(ref _inputsWithoutOwner);
+                return;
+        }
     }
 
     private void LogActivity()
     {
         var inputs = Interlocked.Exchange(ref _inputsRelayed, 0);
+        var dropped = Interlocked.Exchange(ref _inputsDropped, 0);
         var unowned = Interlocked.Exchange(ref _inputsWithoutOwner, 0);
         var ok = Interlocked.Exchange(ref _framesOk, 0);
         var failed = Interlocked.Exchange(ref _framesFailed, 0);
         var totalMs = Interlocked.Exchange(ref _frameMsTotal, 0);
         var maxMs = Interlocked.Exchange(ref _frameMsMax, 0);
-        if (inputs + unowned + ok + failed == 0)
+        if (inputs + dropped + unowned + ok + failed == 0)
         {
             return;
         }
 
         _logger.LogInformation(
-            "Activity: {Inputs} input reports relayed, {Unowned} with no client; LCD {Ok} frames ok (avg {AvgMs} ms, max {MaxMs} ms), {Failed} failed",
+            "Activity: {Inputs} input reports relayed, {Dropped} dropped for a slow client, {Unowned} with no client; LCD {Ok} frames ok (avg {AvgMs} ms, max {MaxMs} ms), {Failed} failed",
             inputs,
+            dropped,
             unowned,
             ok,
             ok == 0 ? 0 : totalMs / ok,

@@ -12,6 +12,9 @@ export const SIDECAR_PROTOCOL = 1;
 export const DEFAULT_SIDECAR_URL = 'ws://127.0.0.1:17104/whb04b';
 export const SIDECAR_CLOSE_SUPERSEDED = 4001;
 export const SIDECAR_CLOSE_MALFORMED = 4400;
+export const SIDECAR_CLOSE_FORBIDDEN = 4403;
+// Reports older (or further in the future) than this keep only their dials.
+export const SIDECAR_STALE_MS = 300;
 
 // idle: not connected (initial or destroyed).
 // connecting: socket opening, or open and waiting for hello.
@@ -19,25 +22,27 @@ export const SIDECAR_CLOSE_MALFORMED = 4400;
 // device-missing: sidecar reachable, pendant not plugged in.
 // offline: sidecar unreachable or connection lost; reconnecting with backoff.
 // superseded: another widget took the sidecar; manual connect() only.
+// forbidden: the sidecar refused this page's origin (4403); manual connect() only.
 // incompatible: sidecar speaks another protocol version; manual connect() only.
 export const SidecarLink = Object.freeze({
   Idle: 'idle', Connecting: 'connecting', Open: 'open', DeviceMissing: 'device-missing',
-  Offline: 'offline', Superseded: 'superseded', Incompatible: 'incompatible',
+  Offline: 'offline', Superseded: 'superseded', Forbidden: 'forbidden', Incompatible: 'incompatible',
 });
+const MANUAL_ONLY = [SidecarLink.Superseded, SidecarLink.Forbidden, SidecarLink.Incompatible];
 
 const INPUT_REPORT_ID = 0x04;
 const INPUT_BODY_SIZE = 7;
 const RECONNECT_MIN = 500;
 const RECONNECT_MAX = 5000;
 
-const isByteArray = (value, length) => Array.isArray(value) && value.length === length
-  && value.every(byte => Number.isInteger(byte) && byte >= 0 && byte <= 255);
+const isBodyArray = value => Array.isArray(value) && value.length >= INPUT_BODY_SIZE
+  && value.slice(0, INPUT_BODY_SIZE).every(byte => Number.isInteger(byte) && byte >= 0 && byte <= 255);
 
 export class WHB04BSidecar extends EventTarget {
   constructor({ url = DEFAULT_SIDECAR_URL, WebSocket: Socket = globalThis.WebSocket,
-    schedule = (fn, ms) => setTimeout(fn, ms), cancel = id => clearTimeout(id) } = {}) {
+    schedule = (fn, ms) => setTimeout(fn, ms), cancel = id => clearTimeout(id), now = () => Date.now() } = {}) {
     super();
-    Object.assign(this, { url, Socket, schedule, cancel });
+    Object.assign(this, { url, Socket, schedule, cancel, now });
     this.connected = false;
     this.link = SidecarLink.Idle;
     this.linkDetail = {};
@@ -45,6 +50,7 @@ export class WHB04BSidecar extends EventTarget {
     this.socket = null;
     this._superseded = null;
     this._previous = null;
+    this._staleCount = 0;
     this._reconnectTimer = null;
     this._reconnectDelay = RECONNECT_MIN;
     this._helloWaiters = [];
@@ -70,9 +76,9 @@ export class WHB04BSidecar extends EventTarget {
     return this._open();
   }
 
-  // Automatic (re)connect; never overrides superseded or incompatible.
+  // Automatic (re)connect; never overrides superseded, forbidden, or incompatible.
   async tryReconnect() {
-    if ([SidecarLink.Superseded, SidecarLink.Incompatible].includes(this.link)) return false;
+    if (MANUAL_ONLY.includes(this.link)) return false;
     if (this.socket) return this.connected;
     if (this.link === SidecarLink.Idle) this._setLink(SidecarLink.Connecting, { url: this.url });
     return this._open();
@@ -149,6 +155,7 @@ export class WHB04BSidecar extends EventTarget {
   _detach() {
     this._displayEpoch++;
     this._failInFlight(new Error('Pendant disconnected during LCD update.'));
+    this._endStaleBurst();
     if (!this.connected) return;
     this.connected = false;
     this._previous = null;
@@ -164,6 +171,7 @@ export class WHB04BSidecar extends EventTarget {
     this._settleHello(false);
     const detail = { url: this.url, code: event.code, reason: event.reason || '' };
     if (superseded) { this._setLink(SidecarLink.Superseded, detail); return; }
+    if (event.code === SIDECAR_CLOSE_FORBIDDEN) { this._setLink(SidecarLink.Forbidden, detail); return; }
     this._setLink(SidecarLink.Offline, { ...detail, cause: !opened ? 'unreachable' : event.code === SIDECAR_CLOSE_MALFORMED ? 'rejected' : 'lost' });
     this._scheduleReconnect();
   }
@@ -192,13 +200,31 @@ export class WHB04BSidecar extends EventTarget {
     try { socket.close(1000); } catch { /* already closing */ }
   }
 
+  // A late report (frozen page, backed-up socket) must not replay keys or
+  // wheel motion: keep its dials, release keys, zero the wheel. A report
+  // without a usable `t` stamp counts as stale.
   _handleInput(message) {
-    if (!this.connected || message.reportId !== INPUT_REPORT_ID || !isByteArray(message.data, INPUT_BODY_SIZE)) return;
-    const bytes = Uint8Array.from([message.reportId, ...message.data]);
+    if (!this.connected || message.reportId !== INPUT_REPORT_ID || !isBodyArray(message.data)) return;
+    const body = message.data.slice(0, INPUT_BODY_SIZE);
+    const stale = typeof message.t !== 'number' || !(Math.abs(this.now() - message.t) <= SIDECAR_STALE_MS);
+    if (stale) {
+      body[1] = 0; body[2] = 0; body[5] = 0;
+      this._staleCount++;
+    } else {
+      this._endStaleBurst();
+    }
+    const bytes = Uint8Array.from([message.reportId, ...body]);
     const sig = bytes.join(',');
     if (sig === this._previous) return;
     this._previous = sig;
     this.dispatchEvent(new CustomEvent('use', { detail: parseInput(bytes) }));
+  }
+
+  // One `stale` event per burst, when it ends, with the number of reports.
+  _endStaleBurst() {
+    const count = this._staleCount;
+    this._staleCount = 0;
+    if (count) this.dispatchEvent(new CustomEvent('stale', { detail: { count } }));
   }
 
   _handleDisplayReply(message) {

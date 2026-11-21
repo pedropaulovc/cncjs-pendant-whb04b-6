@@ -28,6 +28,17 @@ internal static class AppPaths
     public static string LogDirectory { get; } = Path.Combine(DataDirectory, "logs");
 }
 
+/// <summary>What was found at the settings path. Invalid files are never overwritten.</summary>
+internal enum SettingsFileState
+{
+    Missing,
+    Valid,
+    Invalid,
+}
+
+/// <summary>Loaded (or default) settings, the file's state, and for invalid files the reason.</summary>
+internal sealed record SettingsLoad(SidecarSettings Settings, SettingsFileState State, string? Problem);
+
 /// <summary>settings.json: <c>{"allowedOrigins":[...],"port":17104,"startAtLogin":false}</c>.</summary>
 internal sealed class SidecarSettings
 {
@@ -46,25 +57,23 @@ internal sealed class SidecarSettings
 
     public bool StartAtLogin { get; set; }
 
-    /// <summary>Missing file → defaults. Unreadable/invalid file → defaults plus a warning (the file is left untouched).</summary>
-    public static SidecarSettings Load(string path, out string? warning)
+    /// <summary>Missing file → defaults. Unreadable/invalid file → defaults plus the problem (the file is left untouched).</summary>
+    public static SettingsLoad Load(string path)
     {
-        warning = null;
         if (!File.Exists(path))
         {
-            return new SidecarSettings();
+            return new SettingsLoad(new SidecarSettings(), SettingsFileState.Missing, null);
         }
 
         try
         {
             var settings = JsonSerializer.Deserialize<SidecarSettings>(File.ReadAllText(path), JsonOptions) ?? new SidecarSettings();
             settings.AllowedOrigins ??= [];
-            return settings;
+            return new SettingsLoad(settings, SettingsFileState.Valid, null);
         }
         catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
         {
-            warning = $"Ignoring {path}: {ex.Message}";
-            return new SidecarSettings();
+            return new SettingsLoad(new SidecarSettings(), SettingsFileState.Invalid, $"{path} is invalid and was ignored: {ex.Message}");
         }
     }
 

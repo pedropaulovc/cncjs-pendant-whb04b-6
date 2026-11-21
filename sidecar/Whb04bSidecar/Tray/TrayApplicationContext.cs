@@ -16,7 +16,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 {
     private readonly SidecarHost _host;
     private readonly SidecarOptions _options;
-    private readonly SidecarSettings _settings;
+    private readonly SettingsLoad _settingsLoad;
     private readonly ILogger _logger;
     private readonly NotifyIcon _notifyIcon;
     private readonly ToolStripMenuItem _statusItem;
@@ -26,11 +26,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly Icon _idleIcon = CreateStatusIcon(Color.FromArgb(230, 160, 20));
     private readonly Icon _activeIcon = CreateStatusIcon(Color.FromArgb(40, 180, 70));
 
-    public TrayApplicationContext(SidecarHost host, SidecarOptions options, SidecarSettings settings, ILogger logger)
+    public TrayApplicationContext(SidecarHost host, SidecarOptions options, SettingsLoad settingsLoad, ILogger logger)
     {
         _host = host;
         _options = options;
-        _settings = settings;
+        _settingsLoad = settingsLoad;
         _logger = logger;
 
         // A handle-backed control gives a way to marshal hub events (raised on HID/socket threads) onto the UI thread.
@@ -38,9 +38,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _ = _uiThread.Handle;
 
         _statusItem = new ToolStripMenuItem { Enabled = false };
-        _startAtLoginItem = new ToolStripMenuItem("Start at login", null, (_, _) => ToggleStartAtLogin())
+        // With an invalid settings.json the toggle would have to overwrite the user's file, so it is disabled.
+        var settingsValid = settingsLoad.State != SettingsFileState.Invalid;
+        _startAtLoginItem = new ToolStripMenuItem(settingsValid ? "Start at login" : "Start at login (settings.json is invalid)", null, (_, _) => ToggleStartAtLogin())
         {
-            Checked = StartupRegistration.IsEnabled(),
+            Checked = StartupRegistration.Current() == LoginStartup.Enabled,
+            Enabled = settingsValid,
         };
         var menu = new ContextMenuStrip();
         menu.Items.Add(_statusItem);
@@ -53,6 +56,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _notifyIcon = new NotifyIcon { ContextMenuStrip = menu, Visible = true };
         _host.Hub.StatusChanged += OnStatusChanged;
         UpdateStatus();
+        if (settingsLoad.Problem is not null)
+        {
+            // Balloon text is capped by Windows at about 255 characters.
+            var text = $"{settingsLoad.Problem} Using defaults; fix the file and restart.";
+            _notifyIcon.ShowBalloonTip(10000, "WHB04B sidecar: settings.json invalid", text.Length <= 255 ? text : text[..255], ToolTipIcon.Warning);
+        }
     }
 
     /// <summary>Called (from any thread) when a second launch signals this instance.</summary>
@@ -114,14 +123,14 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void ToggleStartAtLogin()
     {
-        var enable = !_startAtLoginItem.Checked;
+        var startup = _startAtLoginItem.Checked ? LoginStartup.Disabled : LoginStartup.Enabled;
         try
         {
-            StartupRegistration.Apply(enable);
-            _settings.StartAtLogin = enable;
-            _settings.Save(AppPaths.SettingsFile);
-            _startAtLoginItem.Checked = enable;
-            _logger.LogInformation("Start at login {State}", enable ? "enabled" : "disabled");
+            StartupRegistration.Apply(startup);
+            _settingsLoad.Settings.StartAtLogin = startup == LoginStartup.Enabled;
+            _settingsLoad.Settings.Save(AppPaths.SettingsFile);
+            _startAtLoginItem.Checked = startup == LoginStartup.Enabled;
+            _logger.LogInformation("Start at login {Startup}", startup);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException or InvalidOperationException)
         {

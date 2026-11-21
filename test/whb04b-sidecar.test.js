@@ -2,11 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { buildDisplayFrame, parseInput } from 'cncjs-pendant-whb04b-6';
-import { WHB04BSidecar, DEFAULT_SIDECAR_URL, SidecarLink } from 'cncjs-pendant-whb04b-6/sidecar';
+import { WHB04BSidecar, DEFAULT_SIDECAR_URL, SidecarLink, SIDECAR_STALE_MS } from 'cncjs-pendant-whb04b-6/sidecar';
 import { WHB04BWebHID } from '../web/whb04b-webhid.js';
 import {
-  DEFAULT_LINK, parseLink, createPendant, hiddenTabPolicy, connectLabel, linkPill, linkMessage,
+  DEFAULT_LINK, parseLink, createPendant, transportOf, hiddenTabPolicy, connectLabel, connectPendant, linkPill, linkMessage, staleMessage,
 } from '../web/widget/pendant-link.js';
+
+const WALL = 1_763_600_000_000;
 
 class FakeSocket extends EventTarget {
   constructor(url) {
@@ -16,7 +18,11 @@ class FakeSocket extends EventTarget {
   send(data) { this.sent.push(JSON.parse(data)); }
   close(code) { this.closed = code; }
   open() { this.dispatchEvent(new Event('open')); }
-  receive(message) { this.dispatchEvent(Object.assign(new Event('message'), { data: typeof message === 'string' ? message : JSON.stringify(message) })); }
+  // Input reports carry the sidecar's read time; default to "just read".
+  receive(message) {
+    const stamped = message?.type === 'input' && !('t' in message) ? { ...message, t: this.wall?.() } : message;
+    this.dispatchEvent(Object.assign(new Event('message'), { data: typeof stamped === 'string' ? stamped : JSON.stringify(stamped) }));
+  }
   hello(device = 'attached', extra = {}) { this.open(); this.receive({ type: 'hello', protocol: 1, version: '1.0.0', device, ...extra }); }
   shut(code = 1006, reason = '') { this.dispatchEvent(Object.assign(new Event('close'), { code, reason })); }
 }
@@ -24,22 +30,24 @@ class FakeSocket extends EventTarget {
 function fixture() {
   const sockets = [];
   let time = 0;
+  let wall = WALL;
   const timers = new Map();
-  const Socket = class extends FakeSocket { constructor(url) { super(url); sockets.push(this); } };
+  const Socket = class extends FakeSocket { constructor(url) { super(url); this.wall = () => wall; sockets.push(this); } };
   const pendant = new WHB04BSidecar({
     WebSocket: Socket,
     schedule: (fn, ms) => { timers.set(fn, time + ms); return fn; },
     cancel: fn => timers.delete(fn),
+    now: () => wall,
   });
   const events = [];
-  for (const type of ['attach', 'remove', 'use', 'link']) pendant.addEventListener(type, e => events.push([type, e.detail]));
+  for (const type of ['attach', 'remove', 'use', 'link', 'stale']) pendant.addEventListener(type, e => events.push([type, e.detail]));
   const delays = () => [...timers.values()].map(due => due - time);
   const advance = (ms) => {
     time += ms;
     for (const [fn, due] of [...timers]) if (due <= time) { timers.delete(fn); fn(); }
   };
   const of = type => events.filter(([name]) => name === type).map(([, detail]) => detail);
-  return { pendant, sockets, timers, delays, advance, events, of, get socket() { return sockets.at(-1); } };
+  return { pendant, sockets, timers, delays, advance, events, of, get socket() { return sockets.at(-1); }, setWall(value) { wall = value; } };
 }
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
@@ -120,6 +128,84 @@ test('reattach resets input dedupe so the first report after reconnect is delive
   f.socket.receive({ type: 'device', state: 'attached' });
   f.socket.receive({ type: 'input', reportId: 4, data: body });
   assert.equal(f.of('use').length, 2);
+});
+
+test('input data longer than seven bytes uses the first seven, like WebHID', () => {
+  const f = fixture();
+  f.pendant.connect();
+  f.socket.hello();
+  const body = [0x5a, 0, 0, 0x0f, 0x11, 3, 0x99];
+  f.socket.receive({ type: 'input', reportId: 4, data: [...body, 0, 0, 0] });
+  assert.deepEqual([...f.of('use')[0].raw], [4, ...body]);
+  assert.equal(f.of('use')[0].jog, 3);
+});
+
+test('stale input keeps dials but releases keys and zeroes the wheel', () => {
+  const f = fixture();
+  f.pendant.connect();
+  f.socket.hello();
+  const body = [0x5a, 0x0c, 0x04, 0x1a, 0x12, 5, 0x99];
+  f.socket.receive({ type: 'input', reportId: 4, data: body, t: WALL - SIDECAR_STALE_MS - 1 });
+  const [stale] = f.of('use');
+  assert.deepEqual([...stale.raw], [4, 0x5a, 0, 0, 0x1a, 0x12, 0, 0x99]);
+  assert.equal(stale.firstKey, 'None');
+  assert.equal(stale.secondKey, 'None');
+  assert.equal(stale.jog, 0);
+  assert.equal(stale.leftDial, 'Y');
+  assert.equal(stale.rightDial, '60% / 5');
+  for (const t of [WALL - SIDECAR_STALE_MS, WALL + SIDECAR_STALE_MS]) {
+    f.socket.receive({ type: 'input', reportId: 4, data: [...body.slice(0, 5), t < WALL ? 1 : 2, 0x99], t });
+  }
+  const fresh = f.of('use').slice(1);
+  assert.equal(fresh.length, 2, 'Exactly 300 ms either way is still fresh');
+  assert.equal(fresh[0].firstKey, 'Fn');
+  assert.equal(fresh[0].jog, 1);
+});
+
+test('future, missing, and non-numeric stamps are stale', () => {
+  for (const extra of [{ t: WALL + SIDECAR_STALE_MS + 1 }, { t: undefined }, { t: null }, { t: 'now' }]) {
+    const f = fixture();
+    f.pendant.connect();
+    f.socket.hello();
+    f.socket.receive({ type: 'input', reportId: 4, data: [1, 0x0c, 0x04, 0x0f, 0x11, 5, 0], ...extra });
+    const [use] = f.of('use');
+    assert.equal(use.jog, 0, JSON.stringify(extra));
+    assert.equal(use.firstKeyCode, 0);
+  }
+});
+
+test('a stale burst is reported once, with its count, when fresh input or a detach ends it', () => {
+  const f = fixture();
+  f.pendant.connect();
+  f.socket.hello();
+  const old = WALL - 5000;
+  for (let jog = 1; jog <= 3; jog++) f.socket.receive({ type: 'input', reportId: 4, data: [jog, 0, 0, 0x0f, 0x11, jog, 0], t: old });
+  assert.equal(f.of('stale').length, 0, 'Still inside the burst');
+  f.socket.receive({ type: 'input', reportId: 4, data: [9, 0, 0, 0x0f, 0x11, 1, 0] });
+  assert.deepEqual(f.of('stale'), [{ count: 3 }]);
+  assert.deepEqual(f.events.slice(-2).map(([type]) => type), ['stale', 'use'], 'The burst ends before the fresh report is used');
+  f.socket.receive({ type: 'input', reportId: 4, data: [9, 0, 0, 0x0f, 0x11, 2, 0] });
+  assert.equal(f.of('stale').length, 1);
+  f.socket.receive({ type: 'input', reportId: 4, data: [8, 0, 0, 0x0f, 0x11, 1, 0], t: old });
+  f.socket.receive({ type: 'device', state: 'detached' });
+  assert.deepEqual(f.of('stale'), [{ count: 3 }, { count: 1 }]);
+});
+
+test('close 4403 reports the refused origin and never auto-reconnects; manual connect retries', async () => {
+  const f = fixture();
+  f.pendant.connect();
+  f.socket.open();
+  f.socket.shut(4403, 'origin not allowed: http://cnc.local:8000');
+  assert.equal(f.pendant.link, SidecarLink.Forbidden);
+  assert.deepEqual(f.of('link').at(-1), { link: 'forbidden', url: DEFAULT_SIDECAR_URL, code: 4403, reason: 'origin not allowed: http://cnc.local:8000' });
+  assert.equal(f.timers.size, 0);
+  assert.equal(await f.pendant.tryReconnect(), false);
+  f.advance(60000);
+  assert.equal(f.sockets.length, 1);
+  const retried = f.pendant.connect();
+  assert.equal(f.sockets.length, 2);
+  f.socket.hello();
+  assert.equal(await retried, true);
 });
 
 test('display keeps one frame in flight, coalesces pending snapshots, and settles on ack', async () => {
@@ -338,30 +424,54 @@ test('pendant link settings default to WebHID and validate the sidecar URL', () 
   for (const sidecarUrl of ['http://127.0.0.1:17104/whb04b', 'nonsense', '', 5]) assert.throws(() => parseLink({ transport: 'sidecar', sidecarUrl }), /ws:\/\//);
 });
 
-test('createPendant builds the selected transport', () => {
-  assert.ok(createPendant({ transport: 'webhid', sidecarUrl: DEFAULT_SIDECAR_URL }) instanceof WHB04BWebHID);
-  const sidecar = createPendant({ transport: 'sidecar', sidecarUrl: 'ws://127.0.0.1:1/x' }, { WebSocket: FakeSocket });
+test('createPendant builds the selected transport with the shared timers', () => {
+  const schedule = () => 0, cancel = () => {};
+  const webhid = createPendant({ transport: 'webhid', sidecarUrl: DEFAULT_SIDECAR_URL }, { schedule, cancel });
+  assert.ok(webhid instanceof WHB04BWebHID);
+  assert.equal(webhid.schedule, schedule);
+  const sidecar = createPendant({ transport: 'sidecar', sidecarUrl: 'ws://127.0.0.1:1/x' }, { WebSocket: FakeSocket, schedule, cancel });
   assert.ok(sidecar instanceof WHB04BSidecar);
   assert.equal(sidecar.url, 'ws://127.0.0.1:1/x');
   assert.equal(sidecar.Socket, FakeSocket);
+  assert.equal(sidecar.schedule, schedule);
+  assert.equal(sidecar.cancel, cancel);
 });
 
-test('only the sidecar keeps handling input while the tab is hidden', () => {
-  assert.equal(hiddenTabPolicy('sidecar'), 'keep-working');
-  assert.equal(hiddenTabPolicy('webhid'), 'suspend');
+test('hidden-tab policy and Connect follow the driver instance, not the selected link', async () => {
+  const sidecar = createPendant({ transport: 'sidecar', sidecarUrl: 'ws://127.0.0.1:1/x' }, { WebSocket: FakeSocket });
+  const webhid = new WHB04BWebHID();
+  assert.equal(transportOf(sidecar), 'sidecar');
+  assert.equal(transportOf(webhid), 'webhid');
+  assert.equal(transportOf(null), null);
+  assert.equal(hiddenTabPolicy(sidecar), 'keep-working');
+  assert.equal(hiddenTabPolicy(webhid), 'suspend');
+  assert.equal(hiddenTabPolicy(null), 'suspend', 'Mid-switch input is gated as safely as WebHID');
   assert.equal(connectLabel('sidecar'), 'Connect sidecar');
   assert.equal(connectLabel('webhid'), 'Connect pendant');
+  assert.equal(await connectPendant(null), 'switching', 'Connect during a switch reaches no driver');
+  let opened = 0;
+  sidecar.connect = () => { opened++; return Promise.resolve(true); };
+  assert.equal(await connectPendant(sidecar), 'requested');
+  assert.equal(opened, 1);
+  webhid.requestDevice = async () => false;
+  assert.equal(await connectPendant(webhid), 'not-selected');
+  webhid.requestDevice = async () => true;
+  assert.equal(await connectPendant(webhid), 'connected');
 });
 
-test('pendant pill distinguishes sidecar not running, pendant unplugged, and claimed elsewhere', () => {
-  const pill = (link, extra = {}) => linkPill('sidecar', { connected: false, link, linkDetail: {}, ...extra });
-  assert.deepEqual(linkPill('webhid', { connected: true }), { on: true, text: 'pendant ready' });
-  assert.deepEqual(linkPill('webhid', { connected: false }), { on: false, text: 'pendant offline' });
+test('pendant pill distinguishes sidecar not running, pendant unplugged, refused origin, and claimed elsewhere', () => {
+  const sidecar = createPendant({ transport: 'sidecar', sidecarUrl: DEFAULT_SIDECAR_URL }, { WebSocket: FakeSocket });
+  const pill = (link, extra = {}) => linkPill(Object.assign(sidecar, { connected: false, link, linkDetail: {}, ...extra }));
+  const webhid = new WHB04BWebHID();
+  assert.deepEqual(linkPill(Object.assign(webhid, { connected: true })), { on: true, text: 'pendant ready' });
+  assert.deepEqual(linkPill(Object.assign(webhid, { connected: false })), { on: false, text: 'pendant offline' });
+  assert.deepEqual(linkPill(null), { on: false, text: 'pendant offline' });
   assert.deepEqual(pill('open', { connected: true }), { on: true, text: 'pendant ready (sidecar)' });
   assert.deepEqual(pill('offline', { linkDetail: { cause: 'unreachable' } }), { on: false, text: 'sidecar not running' });
   assert.deepEqual(pill('offline', { linkDetail: { cause: 'lost' } }), { on: false, text: 'sidecar offline' });
   assert.deepEqual(pill('device-missing'), { on: false, text: 'pendant not plugged in' });
   assert.deepEqual(pill('superseded'), { on: false, text: 'claimed by another widget' });
+  assert.deepEqual(pill('forbidden'), { on: false, text: 'origin not allowed' });
   assert.deepEqual(pill('incompatible'), { on: false, text: 'sidecar version mismatch' });
   assert.deepEqual(pill('connecting'), { on: false, text: 'sidecar connecting' });
   assert.deepEqual(pill('idle'), { on: false, text: 'pendant offline' });
@@ -377,4 +487,11 @@ test('link log messages explain each sidecar state', () => {
   assert.equal(linkMessage({ link: 'incompatible', url, protocol: 2, version: '2.0.0' }), 'Pendant sidecar 2.0.0 speaks protocol 2; this widget needs protocol 1. Update the sidecar or the widget.');
   assert.equal(linkMessage({ link: 'open', url }), '', 'attach already logs the connection');
   assert.equal(linkMessage({ link: 'idle' }), '');
+  const forbidden = linkMessage({ link: 'forbidden', url, code: 4403, reason: 'origin not allowed: http://cnc.local:8000' }, { origin: 'http://cnc.local:8000' });
+  assert.match(forbidden, /refused this page's origin http:\/\/cnc\.local:8000/);
+  assert.match(forbidden, /--allow-origin http:\/\/cnc\.local:8000/);
+  assert.match(forbidden, /allowedOrigins in %LOCALAPPDATA%\\WHB04B-Sidecar\\settings\.json/);
+  assert.match(forbidden, /press Connect sidecar/);
+  assert.equal(staleMessage(3), 'Pendant: ignored keys and wheel in 3 late sidecar reports (more than 300 ms old); dial positions still applied.');
+  assert.match(staleMessage(1), /1 late sidecar report \(/);
 });

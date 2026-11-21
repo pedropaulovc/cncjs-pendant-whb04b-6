@@ -1,4 +1,6 @@
 using System.Buffers;
+using System.Net.WebSockets;
+using System.Text;
 using System.Text.Json;
 using Whb04bSidecar.Devices;
 
@@ -11,6 +13,10 @@ internal readonly record struct DisplayRequest(uint Id, byte[] Frame);
 internal static class Protocol
 {
     public const int Version = 1;
+    public const WebSocketCloseStatus SupersededCloseStatus = (WebSocketCloseStatus)4001;
+    public const WebSocketCloseStatus MalformedCloseStatus = (WebSocketCloseStatus)4400;
+    public const WebSocketCloseStatus OriginRejectedCloseStatus = (WebSocketCloseStatus)4403;
+    private const int MaxCloseReasonBytes = 123;
 
     public static string StateName(DeviceState state) => state == DeviceState.Attached ? "attached" : "detached";
 
@@ -33,6 +39,7 @@ internal static class Protocol
         w.WriteString("type", "input");
         w.WriteNumber("reportId", report.ReportId);
         WriteByteArray(w, "data", report.Data);
+        w.WriteNumber("t", report.Timestamp);
     });
 
     public static byte[] DisplayAck(uint id) => Build(w =>
@@ -59,6 +66,23 @@ internal static class Protocol
         }
 
         writer.WriteEndArray();
+    }
+
+    /// <summary>WebSocket close reasons are limited to 123 UTF-8 bytes; longer ones are cut on a character boundary.</summary>
+    public static string CloseReason(string reason)
+    {
+        if (Encoding.UTF8.GetByteCount(reason) <= MaxCloseReasonBytes)
+        {
+            return reason;
+        }
+
+        var end = Math.Min(reason.Length, MaxCloseReasonBytes);
+        while (Encoding.UTF8.GetByteCount(reason.AsSpan(0, end)) > MaxCloseReasonBytes)
+        {
+            end--;
+        }
+
+        return reason[..end];
     }
 
     /// <summary>Parses the only client message type (<c>display</c>). On failure <paramref name="error"/> is the 4400 close reason.</summary>

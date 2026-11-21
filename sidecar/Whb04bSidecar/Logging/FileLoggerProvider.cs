@@ -20,11 +20,17 @@ internal sealed class FileLoggerProvider : ILoggerProvider
     private StreamWriter? _writer;
     private string? _day;
     private int _index;
-    private bool _failed;
+    private SinkState _sinkState = SinkState.Writing;
 
     public FileLoggerProvider(string directory)
     {
         _directory = directory;
+    }
+
+    private enum SinkState
+    {
+        Writing,
+        Failed,
     }
 
     public ILogger CreateLogger(string categoryName) => new FileLogger(this, ShortCategory(categoryName));
@@ -56,7 +62,7 @@ internal sealed class FileLoggerProvider : ILoggerProvider
 
         lock (_lock)
         {
-            if (_failed)
+            if (_sinkState == SinkState.Failed)
             {
                 return;
             }
@@ -70,7 +76,7 @@ internal sealed class FileLoggerProvider : ILoggerProvider
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 // Logging must never take the relay down; give up on the file sink for this run.
-                _failed = true;
+                _sinkState = SinkState.Failed;
                 _writer?.Dispose();
                 _writer = null;
             }

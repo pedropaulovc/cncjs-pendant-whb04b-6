@@ -2,6 +2,26 @@ using Whb04bSidecar.Server;
 
 namespace Whb04bSidecar;
 
+internal enum CommandLineAction
+{
+    Run,
+    ShowHelp,
+    ShowVersion,
+}
+
+/// <summary>Tray: notification-area icon and single instance. Headless (--no-tray): console logging, Ctrl+C to stop.</summary>
+internal enum RunMode
+{
+    Tray,
+    Headless,
+}
+
+internal enum LogVerbosity
+{
+    Normal,
+    Verbose,
+}
+
 internal sealed class CommandLine
 {
     public const string Usage = """
@@ -18,25 +38,25 @@ internal sealed class CommandLine
         Settings: %LOCALAPPDATA%\WHB04B-Sidecar\settings.json   Logs: %LOCALAPPDATA%\WHB04B-Sidecar\logs
         """;
 
+    public CommandLineAction Action { get; private set; } = CommandLineAction.Run;
+
+    public RunMode RunMode { get; private set; } = RunMode.Tray;
+
+    public SidecarMode Mode { get; private set; } = SidecarMode.Hid;
+
+    public LogVerbosity Verbosity { get; private set; } = LogVerbosity.Normal;
+
     public int? Port { get; private set; }
 
     public List<string> AllowedOrigins { get; } = [];
 
-    public bool Simulate { get; private set; }
+    /// <summary>The first problem found, or null. Parsing continues past errors so <see cref="RunMode"/> is always known.</summary>
+    public string? Error { get; private set; }
 
-    public bool NoTray { get; private set; }
-
-    public bool Verbose { get; private set; }
-
-    public bool ShowHelp { get; private set; }
-
-    public bool ShowVersion { get; private set; }
-
-    /// <summary>Accepts <c>--name value</c> and <c>--name=value</c>. Returns false with <paramref name="error"/> on bad input.</summary>
-    public static bool TryParse(IReadOnlyList<string> args, out CommandLine result, out string error)
+    /// <summary>Accepts <c>--name value</c> and <c>--name=value</c>.</summary>
+    public static CommandLine Parse(IReadOnlyList<string> args)
     {
-        result = new CommandLine();
-        error = "";
+        var result = new CommandLine();
         for (var i = 0; i < args.Count; i++)
         {
             var arg = args[i];
@@ -51,63 +71,64 @@ internal sealed class CommandLine
             switch (arg)
             {
                 case "--port":
-                    if (!TryTakeValue(args, ref i, inlineValue, out var portText) || !int.TryParse(portText, out var port) || port is < 0 or > 65535)
+                    var portText = TakeValue(args, ref i, inlineValue);
+                    if (!int.TryParse(portText, out var port) || port is < 0 or > 65535)
                     {
-                        error = "--port needs a number between 0 and 65535";
-                        return false;
+                        result.Fail("--port needs a number between 0 and 65535");
+                        break;
                     }
 
                     result.Port = port;
                     break;
                 case "--allow-origin":
-                    if (!TryTakeValue(args, ref i, inlineValue, out var origin) || !OriginPolicy.TryNormalize(origin, out var normalized))
+                    var origin = TakeValue(args, ref i, inlineValue);
+                    if (origin is null || !OriginPolicy.TryNormalize(origin, out var normalized))
                     {
-                        error = "--allow-origin needs an http(s) origin such as http://cnc.local:8000";
-                        return false;
+                        result.Fail("--allow-origin needs an http(s) origin such as http://cnc.local:8000");
+                        break;
                     }
 
                     result.AllowedOrigins.Add(normalized);
                     break;
                 case "--simulate":
-                    result.Simulate = true;
+                    result.Mode = SidecarMode.Simulated;
                     break;
                 case "--no-tray":
-                    result.NoTray = true;
+                    result.RunMode = RunMode.Headless;
                     break;
                 case "--verbose":
-                    result.Verbose = true;
+                    result.Verbosity = LogVerbosity.Verbose;
                     break;
                 case "--version":
-                    result.ShowVersion = true;
+                    result.Action = CommandLineAction.ShowVersion;
                     break;
                 case "--help" or "-h" or "/?":
-                    result.ShowHelp = true;
+                    result.Action = CommandLineAction.ShowHelp;
                     break;
                 default:
-                    error = $"Unknown option: {args[i]}";
-                    return false;
+                    result.Fail($"Unknown option: {args[i]}");
+                    break;
             }
         }
 
-        return true;
+        return result;
     }
 
-    private static bool TryTakeValue(IReadOnlyList<string> args, ref int index, string? inlineValue, out string value)
+    private void Fail(string error) => Error ??= error;
+
+    private static string? TakeValue(IReadOnlyList<string> args, ref int index, string? inlineValue)
     {
         if (inlineValue is not null)
         {
-            value = inlineValue;
-            return value.Length > 0;
+            return inlineValue.Length > 0 ? inlineValue : null;
         }
 
         if (index + 1 >= args.Count)
         {
-            value = "";
-            return false;
+            return null;
         }
 
         index++;
-        value = args[index];
-        return true;
+        return args[index];
     }
 }

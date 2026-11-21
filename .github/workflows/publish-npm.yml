@@ -53,7 +53,9 @@ jobs:
           grep -q '[^[:space:]]' release-notes.md
 
   publish:
-    needs: validate-release
+    # npm publish is irreversible: only run once the sidecar exe built and tested,
+    # so a release never ships without its GitHub release asset.
+    needs: [validate-release, sidecar-exe]
     runs-on: ubuntu-latest
     permissions:
       contents: read

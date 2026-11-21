@@ -71,18 +71,39 @@ public sealed class HttpEndpointTests
     [InlineData("null")]
     [InlineData("file://")]
     [InlineData("chrome-extension://abcdef")]
-    public async Task ForeignOriginsGet403AndNoUpgrade(string origin)
+    public async Task ForeignOriginsGet403OnHttpAnd4403OnWebSocket(string origin)
     {
         await using var server = await StartFakeAsync();
 
         using var response = await GetHealthAsync(server, origin);
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
 
-        using var socket = new ClientWebSocket();
-        socket.Options.SetRequestHeader("Origin", origin);
-        socket.Options.CollectHttpResponseDetails = true;
-        await Assert.ThrowsAsync<WebSocketException>(() => socket.ConnectAsync(server.WebSocketUri, CancellationToken.None));
-        Assert.Equal(HttpStatusCode.Forbidden, socket.HttpStatusCode);
+        using var socket = await server.ConnectAsync(origin);
+        var (status, before) = await ReceiveCloseAsync(socket);
+        Assert.Equal(4403, status);
+        Assert.Empty(before);
+        Assert.Equal($"origin not allowed: {origin}", socket.CloseStatusDescription);
+        await WaitForAsync(async () => (await HealthAsync(server)).GetProperty("clients").GetInt32() == 0);
+    }
+
+    [Fact]
+    public async Task RejectedOriginNeverSupersedesTheOwnerAndWarnsOnce()
+    {
+        await using var server = await StartFakeAsync();
+        using var owner = await server.ConnectOwnerAsync();
+
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            using var intruder = await server.ConnectAsync("http://evil.example");
+            Assert.Equal(4403, (await ReceiveCloseAsync(intruder)).Status);
+        }
+
+        Assert.Equal(WebSocketState.Open, owner.State);
+        Assert.Equal(1, (await HealthAsync(server)).GetProperty("clients").GetInt32());
+        server.Fake.EmitInput(1, 2, 3, 4, 5, 6, 7);
+        Assert.Equal("input", (await ReceiveJsonAsync(owner)).GetProperty("type").GetString());
+        var warnings = server.ReadLog().Split('\n').Count(line => line.Contains(" WRN ") && line.Contains("origin http://evil.example"));
+        Assert.Equal(1, warnings);
     }
 
     [Fact]
@@ -148,6 +169,7 @@ public sealed class HttpEndpointTests
         Assert.Equal("input", input.GetProperty("type").GetString());
         Assert.Equal(4, input.GetProperty("reportId").GetInt32());
         Assert.Equal(body.Select(b => (byte)b), Bytes(input.GetProperty("data")));
+        AssertFreshTimestamp(input);
     }
 
     [Theory]

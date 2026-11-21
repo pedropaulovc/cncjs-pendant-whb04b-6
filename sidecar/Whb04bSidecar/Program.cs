@@ -22,52 +22,57 @@ internal static class Program
         PortInUse = 3,
     }
 
-    private enum RunMode
+    private enum InstanceClaim
     {
-        Tray,
-        Headless,
+        Acquired,
+        NotNeeded,
+        AlreadyRunning,
+    }
+
+    private enum MessageKind
+    {
+        Info,
+        Error,
     }
 
     [STAThread]
     private static int Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
-        var runMode = args.Contains("--no-tray") ? RunMode.Headless : RunMode.Tray;
-        var wantsConsoleOutput = runMode == RunMode.Headless || args.Any(a => a is "--help" or "-h" or "/?" or "--version");
-        if (wantsConsoleOutput)
+        var cli = CommandLine.Parse(args);
+        if (cli.RunMode == RunMode.Headless || cli.Action != CommandLineAction.Run)
         {
             NativeConsole.AttachToParent();
         }
 
         var version = typeof(Program).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "0.0.0";
-        if (!CommandLine.TryParse(args, out var cli, out var error))
+        if (cli.Error is not null)
         {
-            Report(runMode, $"{error}\n\n{CommandLine.Usage}", isError: true);
+            Report(cli.RunMode, $"{cli.Error}\n\n{CommandLine.Usage}", MessageKind.Error);
             return (int)ExitCode.Usage;
         }
 
-        if (cli.ShowHelp || cli.ShowVersion)
+        switch (cli.Action)
         {
-            Report(runMode, cli.ShowHelp ? CommandLine.Usage : version, isError: false);
+            case CommandLineAction.ShowHelp:
+                Report(cli.RunMode, CommandLine.Usage, MessageKind.Info);
+                return (int)ExitCode.Ok;
+            case CommandLineAction.ShowVersion:
+                Report(cli.RunMode, version, MessageKind.Info);
+                return (int)ExitCode.Ok;
+        }
+
+        var claim = ClaimInstance(cli.RunMode, out var instanceMutex);
+        using var ownedInstanceMutex = instanceMutex;
+        if (claim == InstanceClaim.AlreadyRunning)
+        {
+            SignalRunningInstance();
             return (int)ExitCode.Ok;
         }
 
-        Mutex? instanceMutex = null;
-        if (runMode == RunMode.Tray)
-        {
-            instanceMutex = new Mutex(true, InstanceMutexName, out var isFirstInstance);
-            if (!isFirstInstance)
-            {
-                instanceMutex.Dispose();
-                SignalRunningInstance();
-                return (int)ExitCode.Ok;
-            }
-        }
-
-        using var ownedInstanceMutex = instanceMutex;
-
-        var settings = SidecarSettings.Load(AppPaths.SettingsFile, out var settingsWarning);
-        if (runMode == RunMode.Tray && settingsWarning is null && !File.Exists(AppPaths.SettingsFile))
+        var settingsLoad = SidecarSettings.Load(AppPaths.SettingsFile);
+        var settings = settingsLoad.Settings;
+        if (cli.RunMode == RunMode.Tray && settingsLoad.State == SettingsFileState.Missing)
         {
             settings.Port = SidecarOptions.DefaultPort;
             TrySave(settings);
@@ -76,23 +81,25 @@ internal static class Program
         var options = new SidecarOptions(
             cli.Port ?? settings.Port ?? SidecarOptions.DefaultPort,
             [.. settings.AllowedOrigins, .. cli.AllowedOrigins],
-            cli.Simulate ? SidecarMode.Simulated : SidecarMode.Hid,
+            cli.Mode,
             version);
 
-        using var loggerFactory = CreateLoggerFactory(runMode, cli.Verbose);
+        using var loggerFactory = CreateLoggerFactory(cli.RunMode, cli.Verbosity);
         var logger = loggerFactory.CreateLogger("Whb04bSidecar");
         AppDomain.CurrentDomain.UnhandledException += (_, e) => logger.LogCritical(e.ExceptionObject as Exception, "Unhandled exception");
         TaskScheduler.UnobservedTaskException += (_, e) => logger.LogWarning(e.Exception, "Unobserved task exception");
         logger.LogInformation(
-            "WHB04B sidecar {Version} starting: mode {Mode}, {RunMode}, port {Port}, settings {Settings}",
+            "WHB04B sidecar {Version} starting: mode {Mode}, {RunMode}, port {Port}, console {ConsoleOutput}, settings {Settings} ({SettingsState})",
             version,
             options.ModeName,
-            runMode,
+            cli.RunMode,
             options.Port,
-            AppPaths.SettingsFile);
-        if (settingsWarning is not null)
+            NativeConsole.Output,
+            AppPaths.SettingsFile,
+            settingsLoad.State);
+        if (settingsLoad.Problem is not null)
         {
-            logger.LogWarning("{Warning}", settingsWarning);
+            logger.LogWarning("{Problem}", settingsLoad.Problem);
         }
 
         foreach (var origin in settings.AllowedOrigins.Where(o => !OriginPolicy.TryNormalize(o, out _)))
@@ -113,7 +120,7 @@ internal static class Program
             var portInUse = ex is PortInUseException;
             var message = portInUse ? ex.Message : $"Could not start the sidecar: {ex.Message}";
             logger.LogError(portInUse ? null : ex, "{Error}", message);
-            Report(runMode, message, isError: true);
+            Report(cli.RunMode, message, MessageKind.Error);
             Task.Run(() => host.DisposeAsync().AsTask()).GetAwaiter().GetResult();
             return (int)(portInUse ? ExitCode.PortInUse : ExitCode.Fatal);
         }
@@ -123,14 +130,7 @@ internal static class Program
 
         try
         {
-            if (runMode == RunMode.Headless)
-            {
-                RunHeadless();
-            }
-            else
-            {
-                RunTray(host, options, settings, logger);
-            }
+            Run(cli.RunMode, host, options, settingsLoad, logger);
         }
         finally
         {
@@ -141,45 +141,88 @@ internal static class Program
         return (int)ExitCode.Ok;
     }
 
-    private static ILoggerFactory CreateLoggerFactory(RunMode runMode, bool verbose) => LoggerFactory.Create(builder =>
+    private static void Run(RunMode runMode, SidecarHost host, SidecarOptions options, SettingsLoad settingsLoad, ILogger logger)
     {
-        builder.SetMinimumLevel(verbose ? LogLevel.Debug : LogLevel.Information);
+        switch (runMode)
+        {
+            case RunMode.Headless:
+                RunHeadless(logger);
+                return;
+            case RunMode.Tray:
+                RunTray(host, options, settingsLoad, logger);
+                return;
+        }
+    }
+
+    /// <summary>Tray runs are single-instance; headless runs (tests, CI, other ports) are not.</summary>
+    private static InstanceClaim ClaimInstance(RunMode runMode, out Mutex? mutex)
+    {
+        mutex = null;
+        if (runMode != RunMode.Tray)
+        {
+            return InstanceClaim.NotNeeded;
+        }
+
+        var candidate = new Mutex(true, InstanceMutexName, out var isFirstInstance);
+        if (!isFirstInstance)
+        {
+            candidate.Dispose();
+            return InstanceClaim.AlreadyRunning;
+        }
+
+        mutex = candidate;
+        return InstanceClaim.Acquired;
+    }
+
+    private static ILoggerFactory CreateLoggerFactory(RunMode runMode, LogVerbosity verbosity) => LoggerFactory.Create(builder =>
+    {
+        builder.SetMinimumLevel(verbosity == LogVerbosity.Verbose ? LogLevel.Debug : LogLevel.Information);
         builder.AddFilter("Microsoft", LogLevel.Warning);
         builder.AddFilter("System", LogLevel.Warning);
         // The generic host logs start failures with a full stack; Main reports them once, readably.
         builder.AddFilter("Microsoft.Extensions.Hosting.Internal.Host", LogLevel.None);
         builder.AddProvider(new FileLoggerProvider(AppPaths.LogDirectory));
-        if (runMode == RunMode.Headless)
+        if (runMode != RunMode.Headless)
         {
-            builder.AddSimpleConsole(console =>
-            {
-                console.SingleLine = true;
-                console.TimestampFormat = "HH:mm:ss.fff ";
-            });
+            return;
         }
+
+        builder.AddSimpleConsole(console =>
+        {
+            console.SingleLine = true;
+            console.TimestampFormat = "HH:mm:ss.fff ";
+        });
     });
 
-    private static void RunHeadless()
+    /// <summary>Runs until Ctrl+C / Ctrl+Break (SIGINT) or console close / logoff / shutdown (SIGTERM).</summary>
+    private static void RunHeadless(ILogger logger)
     {
         using var stop = new ManualResetEventSlim();
         void RequestStop(PosixSignalContext context)
         {
             context.Cancel = true;
+            logger.LogInformation("Received {Signal}", context.Signal);
             stop.Set();
         }
 
         using var sigint = PosixSignalRegistration.Create(PosixSignal.SIGINT, RequestStop);
+        using var sigquit = PosixSignalRegistration.Create(PosixSignal.SIGQUIT, RequestStop);
         using var sigterm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, RequestStop);
         stop.Wait();
     }
 
-    private static void RunTray(SidecarHost host, SidecarOptions options, SidecarSettings settings, ILogger logger)
+    private static void RunTray(SidecarHost host, SidecarOptions options, SettingsLoad settingsLoad, ILogger logger)
     {
-        ApplyStartAtLogin(settings.StartAtLogin, logger);
+        // An invalid settings.json is left alone: no Run-key reconciliation from defaults it does not contain.
+        if (settingsLoad.State != SettingsFileState.Invalid)
+        {
+            ApplyStartAtLogin(StartupRegistration.FromSetting(settingsLoad.Settings.StartAtLogin), logger);
+        }
+
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
         Application.ThreadException += (_, e) => logger.LogError(e.Exception, "Unhandled UI exception");
 
-        using var context = new TrayApplicationContext(host, options, settings, logger);
+        using var context = new TrayApplicationContext(host, options, settingsLoad, logger);
         using var showRequests = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
         var registration = ThreadPool.RegisterWaitForSingleObject(showRequests, (_, _) => context.ShowAlreadyRunning(), null, Timeout.Infinite, executeOnlyOnce: false);
         try
@@ -193,20 +236,20 @@ internal static class Program
     }
 
     /// <summary>settings.json is the source of truth; re-registering also refreshes the path if the exe moved.</summary>
-    private static void ApplyStartAtLogin(bool enabled, ILogger logger)
+    private static void ApplyStartAtLogin(LoginStartup startup, ILogger logger)
     {
-        if (!enabled && !StartupRegistration.IsEnabled())
+        if (startup == LoginStartup.Disabled && StartupRegistration.Current() == LoginStartup.Disabled)
         {
             return;
         }
 
         try
         {
-            StartupRegistration.Apply(enabled);
+            StartupRegistration.Apply(startup);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException or InvalidOperationException)
         {
-            logger.LogWarning(ex, "Could not apply start-at-login={Enabled}", enabled);
+            logger.LogWarning(ex, "Could not apply start-at-login {Startup}", startup);
         }
     }
 
@@ -238,43 +281,15 @@ internal static class Program
         }
     }
 
-    private static void Report(RunMode runMode, string message, bool isError)
+    private static void Report(RunMode runMode, string message, MessageKind kind)
     {
-        var writer = isError ? Console.Error : Console.Out;
+        var writer = kind == MessageKind.Error ? Console.Error : Console.Out;
         writer.WriteLine(message);
-        if (runMode == RunMode.Headless || NativeConsole.IsAttached)
+        if (runMode == RunMode.Headless || NativeConsole.Output != ConsoleOutput.None)
         {
             return;
         }
 
-        MessageBox.Show(message, Title, MessageBoxButtons.OK, isError ? MessageBoxIcon.Error : MessageBoxIcon.Information);
-    }
-
-    /// <summary>A WinExe has no console; headless runs borrow the launching terminal's so logs are visible there.</summary>
-    private static class NativeConsole
-    {
-        private const int AttachParentProcess = -1;
-        private const int StdOutputHandle = -11;
-
-        public static bool IsAttached { get; private set; }
-
-        public static void AttachToParent()
-        {
-            // Redirected output (pipes, files) already works; only attach when there is no stdout at all.
-            if (GetStdHandle(StdOutputHandle) != IntPtr.Zero)
-            {
-                IsAttached = true;
-                return;
-            }
-
-            IsAttached = AttachConsole(AttachParentProcess);
-        }
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool AttachConsole(int processId);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern IntPtr GetStdHandle(int handle);
+        MessageBox.Show(message, Title, MessageBoxButtons.OK, kind == MessageKind.Error ? MessageBoxIcon.Error : MessageBoxIcon.Information);
     }
 }

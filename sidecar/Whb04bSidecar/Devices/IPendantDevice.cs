@@ -6,8 +6,11 @@ internal enum DeviceState
     Attached,
 }
 
-/// <summary>One raw input report: the report ID and the body without the ID byte (what WebHID delivers as e.data).</summary>
-internal readonly record struct PendantInputReport(byte ReportId, byte[] Data);
+/// <summary>
+/// One input report: the report ID, exactly the 7 body bytes WebHID delivers as e.data, and when it was read
+/// (<see cref="DateTimeOffset.ToUnixTimeMilliseconds"/> of UtcNow) so clients can discard stale reports.
+/// </summary>
+internal readonly record struct PendantInputReport(byte ReportId, byte[] Data, long Timestamp);
 
 /// <summary>Raised when an LCD frame could not be written; the message goes to the client verbatim.</summary>
 internal sealed class DisplayWriteException(string message, Exception? inner = null) : Exception(message, inner);
@@ -23,7 +26,7 @@ internal interface IPendantDevice : IAsyncDisposable
     /// <summary>Fired on every attach/detach transition (never twice with the same state).</summary>
     event Action<DeviceState>? StateChanged;
 
-    /// <summary>Fired for every input report read from the device, unfiltered. Raised on a device thread.</summary>
+    /// <summary>Fired for every report-ID-0x04 input report read from the device, no dedupe. Raised on a device thread.</summary>
     event Action<PendantInputReport>? InputReport;
 
     /// <summary>Begins device discovery/monitoring. Called once after the server is listening.</summary>
